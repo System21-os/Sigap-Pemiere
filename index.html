@@ -2155,8 +2155,49 @@
                 scroll-behavior: auto !important;
             }
         }
+
+        /* ============================================================
+           [BARU] LEMBAR BARCODE A4 — MASTER ITEM
+           Overlay penuh layar berisi pratinjau lembar label siap cetak:
+           kode item · barcode Data Matrix · nama item · UOM (khusus item AKTIF).
+           Pratinjau memakai satuan fisik (mm/pt) yang PERSIS sama dengan
+           geometri PDF, jadi hasil unduhan sama dengan yang terlihat di layar.
+           Murni presentasi — tidak ada logika lama yang diubah.
+           ============================================================ */
+        #barcode-sheet-modal { display:none; position:fixed; inset:0; z-index:9995; background:var(--bg); flex-direction:column; overflow:hidden; -webkit-overflow-scrolling:touch; }
+        #barcode-sheet-modal.show { display:flex; animation:fadeSlide 0.2s ease; }
+        .bs-topbar { flex:0 0 auto; background:var(--surface); border-bottom:1px solid var(--border); padding:12px 18px; display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; box-shadow:var(--shadow-card); }
+        .bs-toolbar { flex:0 0 auto; display:flex; align-items:center; gap:12px 18px; flex-wrap:wrap; padding:10px 18px; background:var(--surface2); border-bottom:1px solid var(--border); }
+        .bs-field { display:flex; align-items:center; gap:8px; font-size:0.75rem; font-weight:700; color:var(--text-muted); }
+        .bs-field > .lbl { margin:0; }
+        .bs-info { font-size:0.75rem; font-weight:600; color:var(--text-dim); display:flex; align-items:center; gap:6px; }
+        .bs-info b { color:var(--accent); font-variant-numeric:tabular-nums; }
+        .bs-stage { flex:1 1 auto; min-height:0; overflow:auto; -webkit-overflow-scrolling:touch; padding:18px; display:flex; flex-direction:column; align-items:center; gap:18px; }
+        .bs-note { margin:auto; text-align:center; max-width:320px; }
+        .bs-note-sm { font-size:0.75rem; font-weight:600; color:var(--text-dim); text-align:center; margin:0 0 8px; }
+        .bs-bar { margin-top:12px; height:6px; border-radius:99px; background:var(--surface2); overflow:hidden; }
+        .bs-bar > span { display:block; height:100%; background:var(--accent); border-radius:99px; transition:width 0.15s linear; }
+
+        /* Kertas A4 dalam ukuran fisik asli, diperkecil ke layar lewat transform.
+           Wrapper menahan tinggi/lebar hasil penskalaan supaya tata letak rapi. */
+        .bs-paper-wrap { flex:0 0 auto; width:calc(210mm * var(--bs-zoom, 1)); height:calc(297mm * var(--bs-zoom, 1)); overflow:hidden; box-shadow:0 10px 30px rgba(15,18,34,0.18); border-radius:2px; }
+        .bs-paper { width:210mm; height:297mm; box-sizing:border-box; background:#fff; display:grid; gap:0; transform:scale(var(--bs-zoom, 1)); transform-origin:top left; }
+        .bs-cell { display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; overflow:hidden; padding:1.5mm; color:#000; font-family:'Times New Roman', Times, serif; }
+        .bs-code { font-weight:700; line-height:1.1; margin-bottom:1.6mm; word-break:break-all; }
+        .bs-img  { display:block; image-rendering:pixelated; }
+        .bs-name { font-weight:700; line-height:1.2; margin-top:1.6mm; overflow:hidden; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; }
+        .bs-uom  { line-height:1.15; margin-top:0.8mm; color:#333; }
+        .bs-slot-empty { width:100%; height:100%; }
+
+        @media (max-width:640px) {
+            .bs-topbar { padding:10px 14px; }
+            .bs-toolbar { padding:10px 14px; gap:10px 14px; }
+            .bs-stage { padding:12px; }
+        }
     </style>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/bwip-js/3.4.1/bwip-js-min.js"></script>
+    <!-- [BARU] jsPDF: dipakai tombol "Download PDF A4" pada Lembar Barcode Master Item -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 </head>
 <body>
 
@@ -2858,6 +2899,48 @@
         </div>
     </div>
 
+    <!-- [BARU] LEMBAR BARCODE A4 — MASTER ITEM (khusus item berstatus AKTIF) -->
+    <div id="barcode-sheet-modal" aria-hidden="true">
+        <div class="bs-topbar">
+            <div style="display:flex; align-items:center; gap:12px; min-width:0;">
+                <button onclick="closeBarcodeSheetModal()" class="btn-ghost" style="padding:8px 14px;">
+                    <i class="ph ph-arrow-left"></i> Kembali
+                </button>
+                <div style="display:flex; align-items:center; gap:8px; min-width:0;">
+                    <i class="ph ph-barcode" style="color:var(--purple); font-size:1.25rem; flex-shrink:0;"></i>
+                    <span style="font-size:0.95rem; font-weight:800; color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">Lembar Barcode A4 · Item Aktif</span>
+                </div>
+            </div>
+            <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                <button id="bs-btn-print" onclick="printBarcodeSheet()" class="btn-ghost" style="color:var(--purple); border-color:rgba(168,85,247,0.3); background:var(--purple-soft); font-weight:700;">
+                    <i class="ph ph-printer"></i> <span class="m-hide">Cetak</span>
+                </button>
+                <button id="bs-btn-pdf" onclick="downloadBarcodeSheetPdf()" class="btn-primary" style="padding:9px 18px; font-size:0.82rem;">
+                    <i class="ph ph-file-pdf"></i> Download PDF A4
+                </button>
+            </div>
+        </div>
+        <div class="bs-toolbar">
+            <div class="bs-field">
+                <label class="lbl" for="bs-layout">Label per halaman</label>
+                <select id="bs-layout" class="inp" style="width:auto; padding:7px 30px 7px 10px; font-size:0.78rem;" onchange="renderBarcodeSheetPreview()">
+                    <option value="2x5" selected>10 label · 2 × 5 (besar)</option>
+                    <option value="3x7">21 label · 3 × 7 (sedang)</option>
+                    <option value="4x9">36 label · 4 × 9 (kecil)</option>
+                </select>
+            </div>
+            <label class="bs-field" style="cursor:pointer;">
+                <input type="checkbox" id="bs-follow-filter" onchange="refreshBarcodeSheet()" style="width:16px; height:16px; accent-color:var(--accent); cursor:pointer;">
+                Ikuti pencarian &amp; filter tabel
+            </label>
+            <div class="bs-info" style="margin-left:auto;">
+                <i class="ph ph-check-circle" style="color:var(--green); font-size:1rem;"></i>
+                <span><b id="bs-count">0</b> item aktif · <b id="bs-pages">0</b> halaman A4</span>
+            </div>
+        </div>
+        <div class="bs-stage" id="bs-stage"></div>
+    </div>
+
     <!-- MODAL ALERT EXPIRED (pengganti banner besar di tab Exp Monitor) -->
     <div id="exp-alert-modal" style="display:none; position:fixed; inset:0; background:var(--overlay-bg); backdrop-filter:blur(10px); z-index:9994; align-items:center; justify-content:center; padding:1rem;">
         <div style="background:var(--surface); border:1px solid var(--border); border-radius:20px; width:100%; max-width:560px; max-height:86dvh; display:flex; flex-direction:column; overflow:hidden; box-shadow:var(--shadow-xl);">
@@ -3344,6 +3427,11 @@
                             <div style="display:flex; gap:8px; align-items:center;">
                                 <button onclick="loadMasterItems()" class="btn-ghost" style="font-size:0.78rem;">
                                     <i class="ph ph-arrows-clockwise"></i> Refresh
+                                </button>
+                                <button id="btn-print-barcode-master" onclick="openBarcodeSheetModal()" class="btn-ghost"
+                                        style="font-size:0.78rem; color:var(--purple); border-color:rgba(168,85,247,0.3); background:var(--purple-soft); font-weight:700;"
+                                        title="Lembar barcode item AKTIF · siap unduh PDF A4">
+                                    <i class="ph ph-barcode"></i> Barcode A4
                                 </button>
                                 <button id="btn-add-master" onclick="openAddMasterModal()" class="btn-primary" style="padding:9px 18px; font-size:0.82rem;">
                                     <i class="ph ph-plus"></i> Tambah Item
@@ -8560,7 +8648,7 @@ let currentGroup = '', groupId = 0;
             ['closeBarcodeScanner', 'closeItemCamera', 'closeMasterModal', 'closeUserModal', 'closeImagePreview',
              'closeOpnameEditModal', 'closeLaporanOpname', 'closeInboundModal', 'closeOutFormModal',
              'closeMoreSheet', 'closeModal', 'closeRiwayatModal', 'closeKsDetail',
-             'closeExpAlertModal', 'closeBarcodePrintModal'].forEach(name => {
+             'closeExpAlertModal', 'closeBarcodePrintModal', 'closeBarcodeSheetModal'].forEach(name => {
                 const fn = window[name];
                 if (typeof fn === 'function') safe(fn);
             });
@@ -8704,7 +8792,7 @@ let currentGroup = '', groupId = 0;
 
             // [UPGRADE] Aksi tulis Master Item — hanya ADMIN & MANAGER.
             const canMaster = allowed.includes('tab-master');
-            ['btn-add-master'].forEach(id => {
+            ['btn-add-master', 'btn-print-barcode-master'].forEach(id => {
                 const b = document.getElementById(id);
                 if (b) b.style.display = canMaster ? '' : 'none';
             });
@@ -9945,6 +10033,439 @@ let currentGroup = '', groupId = 0;
             if (img && !img.complete) { img.onload = cetak; img.onerror = cetak; }
             else { cetak(); }
             setTimeout(cetak, 1200);
+        }
+
+        // ============================================================
+        // [BARU] LEMBAR BARCODE A4 — MASTER ITEM
+        // ------------------------------------------------------------
+        // Tombol "Barcode A4" di halaman Master Item membuka lembar label siap
+        // cetak: KODE ITEM · barcode Data Matrix · NAMA ITEM · UOM — HANYA untuk
+        // item berstatus AKTIF, lalu bisa diunduh sebagai PDF ukuran A4.
+        //
+        // Seluruhnya berjalan di frontend memakai data master yang sudah dimuat
+        // (globalMasterData). Tidak ada pemanggilan backend baru, tidak ada data
+        // yang ditulis, dan tidak ada logika lama (CRUD master, scanner, cetak
+        // barcode per item) yang diubah.
+        //
+        // Geometri di bawah dipakai BERSAMA oleh pratinjau (HTML, satuan mm/pt)
+        // dan file PDF (jsPDF, satuan mm) supaya hasil unduhan persis sama
+        // dengan yang terlihat di layar.
+        // ============================================================
+        const _BS_PAGE = { w: 210, h: 297 };            // A4 potrait (mm)
+        const _BS_LAYOUTS = {
+            //          kolom  baris  margin(mm)  kode(pt) nama(pt) uom(pt) barcode(mm)
+            '2x5': { cols: 2, rows: 5, margin: 12, code: 12,  name: 10,  uom: 8,   barcode: 32 },
+            '3x7': { cols: 3, rows: 7, margin: 10, code: 9,   name: 8,   uom: 6.5, barcode: 21 },
+            '4x9': { cols: 4, rows: 9, margin: 8,  code: 7,   name: 6.5, uom: 5.5, barcode: 15 }
+        };
+        const _BS_PT_MM = 0.3527777778;                 // 1 pt = 0,3528 mm
+        const _BS_PREVIEW_MAX_PAGES = 3;                // pratinjau ringan; PDF tetap lengkap
+        let _bsLabels = [];                             // [{ kode, nama, uom, payload, dataUrl }]
+        let _bsBusy   = false;
+        let _bsResizeTimer = null;
+
+        function _bsEsc(s) {
+            return (s === null || s === undefined ? '' : String(s))
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        }
+
+        /** Layout aktif sesuai pilihan "Label per halaman". */
+        function _bsLayout() {
+            const sel = document.getElementById('bs-layout');
+            return _BS_LAYOUTS[(sel && sel.value) || '2x5'] || _BS_LAYOUTS['2x5'];
+        }
+
+        /** Kode internal tanpa kurung: "[IB10400030]Sugar Brown Sachet" -> "IB10400030". */
+        function _bsKode(namaItem) {
+            return _kodeOf(namaItem).replace(/[\[\]]/g, '').trim();
+        }
+
+        /**
+         * Kumpulkan item yang akan dicetak: SELALU hanya yang berstatus AKTIF.
+         * Bila "Ikuti pencarian & filter tabel" dicentang, kata kunci + facet
+         * Grup/Lokasi yang sedang aktif di tabel Master ikut diterapkan (status
+         * tetap dikunci AKTIF). Data & filter aslinya tidak disentuh.
+         */
+        function _bsCollectItems() {
+            const followEl = document.getElementById('bs-follow-filter');
+            const follow   = !!(followEl && followEl.checked);
+            const src = (globalMasterData && globalMasterData.length) ? globalMasterData : (masterItems || []);
+            let list = src.filter(it => it && it.namaItem && _masterStatusOf(it) === 'AKTIF');
+
+            if (follow) {
+                const searchEl = document.getElementById('filter-master-name');
+                const keyword  = ((searchEl && searchEl.value) || '').toLowerCase().trim();
+                list = list.filter(it => {
+                    if (keyword &&
+                        !stripCode(it.namaItem || '').toLowerCase().includes(keyword) &&
+                        !(it.namaItem || '').toLowerCase().includes(keyword)) return false;
+                    for (const dim of ['kat', 'lokasi']) {
+                        const set = _MASTER_FACET[dim];
+                        if (set.size && !set.has(_masterFacetValOf(it, dim))) return false;
+                    }
+                    return true;
+                });
+            }
+            return list.slice().sort((a, b) =>
+                stripCode(a.namaItem || '').localeCompare(stripCode(b.namaItem || ''))
+            );
+        }
+
+        /**
+         * Data Matrix -> PNG data URL. Format & library sama persis dengan fitur
+         * "Cetak Barcode" per item yang sudah ada (bwip-js, bcid datamatrix, kotak).
+         * Isi barcode = KODE item (unik, mis. "IB10400030"); item tanpa kode
+         * memakai nama item — keduanya tetap dikenali scanner yang sudah ada.
+         */
+        function _bsBarcodePng(canvas, text) {
+            bwipjs.toCanvas(canvas, {
+                bcid: 'datamatrix',
+                text: text,
+                scale: 6,            // resolusi cukup tinggi supaya tajam saat dicetak
+                format: 'square',    // Data Matrix wajib kotak
+                includetext: false,  // teks ditulis terpisah di bawah/atas barcode
+                padding: 2
+            });
+            return canvas.toDataURL('image/png');
+        }
+
+        /**
+         * Bangun seluruh label secara bertahap (12 item per giliran) agar layar
+         * tetap responsif walau master berisi ratusan item.
+         */
+        function _bsBuildLabels(items, done) {
+            const out = [];
+            const canvas = document.createElement('canvas');
+            let i = 0, gagal = 0;
+            const step = () => {
+                const end = Math.min(i + 12, items.length);
+                for (; i < end; i++) {
+                    const it   = items[i];
+                    const kode = _bsKode(it.namaItem);
+                    const nama = stripCode(it.namaItem) || it.namaItem;
+                    const payload = kode || nama;
+                    let dataUrl = '';
+                    try { dataUrl = _bsBarcodePng(canvas, payload); }
+                    catch (e) { gagal++; }
+                    out.push({ kode: kode || '', nama: nama || '', uom: (it.uom || '').toString().trim(), payload: payload, dataUrl: dataUrl });
+                }
+                _bsSetProgress(i, items.length);
+                if (i < items.length) setTimeout(step, 0);
+                else done({ labels: out, gagal: gagal });
+            };
+            step();
+        }
+
+        function openBarcodeSheetModal() {
+            if (!_canAccess('tab-master')) return _denyAccess('Master Item');
+            if (typeof bwipjs === 'undefined') {
+                return showAlert('Library Belum Siap', 'Pembuat barcode (bwip-js) belum termuat. Periksa koneksi internet lalu coba lagi.', 'error');
+            }
+            const modal = document.getElementById('barcode-sheet-modal');
+            if (!modal) return;
+            modal.style.display = 'flex';
+            void modal.offsetWidth;                       // reflow: animasi buka ikut jalan
+            modal.classList.add('show');
+            modal.setAttribute('aria-hidden', 'false');
+            document.body.style.overflow = 'hidden';      // kunci scroll latar
+            document.addEventListener('keydown', _bsOnKeydown);
+            window.addEventListener('resize', _bsOnResize);
+            refreshBarcodeSheet();
+        }
+
+        function closeBarcodeSheetModal() {
+            const modal = document.getElementById('barcode-sheet-modal');
+            if (!modal) return;
+            modal.classList.remove('show');
+            modal.style.display = 'none';
+            modal.setAttribute('aria-hidden', 'true');
+            document.body.style.overflow = '';
+            document.removeEventListener('keydown', _bsOnKeydown);
+            window.removeEventListener('resize', _bsOnResize);
+        }
+
+        function _bsOnKeydown(e) { if (e.key === 'Escape') closeBarcodeSheetModal(); }
+
+        function _bsOnResize() {
+            clearTimeout(_bsResizeTimer);
+            _bsResizeTimer = setTimeout(_bsApplyZoom, 150);
+        }
+
+        /** Muat ulang daftar item aktif + bangun ulang barcode-nya. */
+        function refreshBarcodeSheet() {
+            if (_bsBusy) return;
+            const items = _bsCollectItems();
+            _bsUpdateInfo(items.length);
+            if (!items.length) {
+                _bsLabels = [];
+                _bsToggleActions(false);
+                _bsShowEmpty();
+                return;
+            }
+            _bsBusy = true;
+            _bsToggleActions(false);
+            _bsShowProgress(items.length);
+            _bsBuildLabels(items, res => {
+                _bsLabels = res.labels;
+                _bsBusy   = false;
+                _bsToggleActions(true);
+                renderBarcodeSheetPreview();
+                if (res.gagal) {
+                    showAlert('Sebagian Barcode Gagal', res.gagal + ' item gagal dibuatkan barcode dan tampil tanpa gambar. Periksa nama/kode item tersebut.', 'warning');
+                }
+            });
+        }
+
+        /** Gambar ulang pratinjau (dipanggil juga saat ukuran label diganti). */
+        function renderBarcodeSheetPreview() {
+            const stage = document.getElementById('bs-stage');
+            if (!stage || _bsBusy) return;
+            if (!_bsLabels.length) { _bsShowEmpty(); return; }
+
+            const L       = _bsLayout();
+            const perPage = L.cols * L.rows;
+            const pages   = Math.ceil(_bsLabels.length / perPage);
+            _bsUpdateInfo(_bsLabels.length, pages);
+
+            const shown = Math.min(pages, _BS_PREVIEW_MAX_PAGES);
+            let html = '';
+            if (pages > shown) {
+                html += '<p class="bs-note-sm"><i class="ph ph-info"></i> Pratinjau menampilkan ' + shown +
+                        ' halaman pertama · file PDF berisi seluruh ' + pages + ' halaman (' + _bsLabels.length + ' item).</p>';
+            }
+            for (let p = 0; p < shown; p++) {
+                html += _bsPaperHtml(_bsLabels.slice(p * perPage, (p + 1) * perPage), L);
+            }
+            stage.innerHTML = html;
+            _bsApplyZoom();
+        }
+
+        /** Satu lembar A4 (dipakai pratinjau maupun jendela cetak). */
+        function _bsPaperHtml(labels, L, forPrint) {
+            const grid = 'padding:' + L.margin + 'mm;' +
+                         'grid-template-columns:repeat(' + L.cols + ',1fr);' +
+                         'grid-template-rows:repeat(' + L.rows + ',1fr);';
+            const cells = labels.map(lb => _bsCellHtml(lb, L)).join('');
+            const paper = '<div class="bs-paper" style="' + grid + '">' + cells + '</div>';
+            return forPrint ? paper : '<div class="bs-paper-wrap">' + paper + '</div>';
+        }
+
+        /** Satu label: kode (atas) · barcode · nama item · UOM. */
+        function _bsCellHtml(lb, L) {
+            const box = 'width:' + L.barcode + 'mm; height:' + L.barcode + 'mm;';
+            const img = lb.dataUrl
+                ? '<img class="bs-img" src="' + lb.dataUrl + '" alt="' + _bsEsc(lb.payload) + '" style="' + box + '">'
+                : '<div style="' + box + ' border:1px dashed #999;"></div>';
+            return '<div class="bs-cell">' +
+                       '<div class="bs-code" style="font-size:' + L.code + 'pt;">' + _bsEsc(lb.kode) + '</div>' +
+                       img +
+                       '<div class="bs-name" style="font-size:' + L.name + 'pt;">' + _bsEsc(lb.nama) + '</div>' +
+                       (lb.uom ? '<div class="bs-uom" style="font-size:' + L.uom + 'pt;">' + _bsEsc(lb.uom) + '</div>' : '') +
+                   '</div>';
+        }
+
+        /** Skala pratinjau supaya satu lembar A4 pas dengan lebar layar. */
+        function _bsApplyZoom() {
+            const stage = document.getElementById('bs-stage');
+            if (!stage) return;
+            const a4px  = _BS_PAGE.w * 96 / 25.4;             // lebar A4 dalam px CSS
+            const avail = Math.max(220, stage.clientWidth - 36);
+            stage.style.setProperty('--bs-zoom', Math.min(1, avail / a4px));
+        }
+
+        function _bsUpdateInfo(count, pages) {
+            const c = document.getElementById('bs-count');
+            const p = document.getElementById('bs-pages');
+            if (c) c.textContent = count || 0;
+            if (p) {
+                const L = _bsLayout();
+                p.textContent = (typeof pages === 'number') ? pages : Math.ceil((count || 0) / (L.cols * L.rows));
+            }
+        }
+
+        function _bsToggleActions(enabled) {
+            ['bs-btn-pdf', 'bs-btn-print'].forEach(id => {
+                const b = document.getElementById(id);
+                if (!b) return;
+                b.disabled = !enabled;
+                b.style.opacity       = enabled ? '' : '0.5';
+                b.style.pointerEvents = enabled ? '' : 'none';
+            });
+        }
+
+        function _bsShowProgress(total) {
+            const stage = document.getElementById('bs-stage');
+            if (!stage) return;
+            stage.innerHTML =
+                '<div class="bs-note">' +
+                    '<i class="ph ph-barcode" style="font-size:2rem; color:var(--purple);"></i>' +
+                    '<p style="margin:10px 0 4px; font-weight:800; color:var(--text);">Menyiapkan barcode…</p>' +
+                    '<p id="bs-prog-txt" style="margin:0; font-size:0.78rem; color:var(--text-dim);">0 / ' + total + ' item</p>' +
+                    '<div class="bs-bar"><span id="bs-prog-bar" style="width:0%;"></span></div>' +
+                '</div>';
+        }
+
+        function _bsSetProgress(done, total) {
+            const txt = document.getElementById('bs-prog-txt');
+            const bar = document.getElementById('bs-prog-bar');
+            if (txt) txt.textContent = done + ' / ' + total + ' item';
+            if (bar) bar.style.width = (total ? Math.round(done / total * 100) : 0) + '%';
+        }
+
+        function _bsShowEmpty() {
+            const stage = document.getElementById('bs-stage');
+            if (!stage) return;
+            const belumMuat = !((globalMasterData && globalMasterData.length) || (masterItems && masterItems.length));
+            stage.innerHTML =
+                '<div class="bs-note">' +
+                    '<i class="ph ' + (belumMuat ? 'ph-cloud-arrow-down' : 'ph-tray') + '" style="font-size:2rem; color:var(--text-dim);"></i>' +
+                    '<p style="margin:10px 0 4px; font-weight:800; color:var(--text);">' +
+                        (belumMuat ? 'Data Master belum dimuat' : 'Tidak ada item aktif') + '</p>' +
+                    '<p style="margin:0; font-size:0.78rem; color:var(--text-dim);">' +
+                        (belumMuat
+                            ? 'Tutup jendela ini, tekan Refresh di halaman Master Item, lalu buka kembali.'
+                            : 'Lembar ini hanya memuat item berstatus AKTIF. Longgarkan filter atau aktifkan item terlebih dahulu.') +
+                    '</p>' +
+                '</div>';
+        }
+
+        /**
+         * Unduh lembar label sebagai PDF A4 (jsPDF). Ukuran, posisi, dan font
+         * mengikuti geometri yang sama dengan pratinjau.
+         */
+        function downloadBarcodeSheetPdf() {
+            if (_bsBusy)          return showAlert('Sedang Diproses', 'Barcode masih disiapkan. Tunggu sebentar lalu coba lagi.', 'info');
+            if (!_bsLabels.length) return showAlert('Tidak Ada Data', 'Tidak ada item AKTIF yang bisa dicetak.', 'info');
+
+            const jsPDFCtor = (window.jspdf && window.jspdf.jsPDF) || window.jsPDF;
+            if (!jsPDFCtor) {
+                return showAlert('Library Belum Siap', 'Pembuat PDF (jsPDF) belum termuat. Periksa koneksi internet lalu coba lagi.', 'error');
+            }
+
+            const L       = _bsLayout();
+            const perPage = L.cols * L.rows;
+            const cellW   = (_BS_PAGE.w - L.margin * 2) / L.cols;
+            const cellH   = (_BS_PAGE.h - L.margin * 2) / L.rows;
+            const GAP     = 1.6;   // jarak antar elemen dalam satu label (mm)
+
+            showLoader(true);
+            try {
+                const doc = new jsPDFCtor({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+
+                _bsLabels.forEach((lb, idx) => {
+                    if (idx > 0 && idx % perPage === 0) doc.addPage();
+                    const slot = idx % perPage;
+                    const cx   = L.margin + (slot % L.cols) * cellW + cellW / 2;               // sumbu tengah kolom
+                    const top  = L.margin + Math.floor(slot / L.cols) * cellH;
+
+                    // Tinggi seluruh isi dihitung dulu supaya label rata tengah di selnya.
+                    doc.setFont('times', 'bold');
+                    doc.setFontSize(L.name);
+                    const namaLines = doc.splitTextToSize(lb.nama || '', cellW - 4).slice(0, 2);
+                    const codeH  = lb.kode ? L.code * _BS_PT_MM * 1.15 : 0;
+                    const nameH  = namaLines.length * L.name * _BS_PT_MM * 1.2;
+                    const uomH   = lb.uom ? L.uom * _BS_PT_MM * 1.2 : 0;
+                    const blockH = codeH + (codeH ? GAP : 0) + L.barcode + GAP + nameH + (uomH ? 0.8 + uomH : 0);
+
+                    let y = top + Math.max(1, (cellH - blockH) / 2);
+
+                    if (lb.kode) {                                   // KODE ITEM (atas)
+                        doc.setFontSize(L.code);
+                        doc.setTextColor(0, 0, 0);
+                        y += codeH;
+                        doc.text(lb.kode, cx, y, { align: 'center' });
+                        y += GAP;
+                    }
+                    if (lb.dataUrl) {                                // BARCODE (tengah)
+                        // compression 'FAST' wajib: tanpa itu jsPDF menyimpan gambar
+                        // mentah sehingga ukuran file membengkak ratusan MB.
+                        doc.addImage(lb.dataUrl, 'PNG', cx - L.barcode / 2, y, L.barcode, L.barcode, undefined, 'FAST');
+                    }
+                    y += L.barcode + GAP;
+
+                    doc.setFontSize(L.name);                         // NAMA ITEM
+                    doc.setTextColor(0, 0, 0);
+                    namaLines.forEach(line => {
+                        y += L.name * _BS_PT_MM * 1.2;
+                        doc.text(line, cx, y, { align: 'center' });
+                    });
+
+                    if (lb.uom) {                                    // UOM (bawah)
+                        doc.setFont('times', 'normal');
+                        doc.setFontSize(L.uom);
+                        doc.setTextColor(60, 60, 60);
+                        y += 0.8 + L.uom * _BS_PT_MM * 1.2;
+                        doc.text(lb.uom, cx, y, { align: 'center' });
+                    }
+                });
+
+                const d = (typeof getJakartaDate === 'function') ? getJakartaDate() : new Date();
+                const stamp = d.getFullYear() + '-' +
+                              String(d.getMonth() + 1).padStart(2, '0') + '-' +
+                              String(d.getDate()).padStart(2, '0');
+                const namaFile = 'Barcode_Item_Aktif_' + stamp + '.pdf';
+                try {
+                    doc.save(namaFile);
+                } catch (e) {
+                    // Jaring pengaman bila unduhan langsung diblokir browser/iframe:
+                    // PDF dibuka di tab baru sehingga tetap bisa disimpan manual.
+                    const url = doc.output('bloburl');
+                    if (!window.open(url, '_blank')) throw e;
+                }
+                showLoader(false);
+                if (typeof hapticFeedback === 'function') hapticFeedback('success');
+            } catch (e) {
+                showLoader(false);
+                console.error('PDF barcode sheet:', e);
+                showAlert('Gagal Membuat PDF', 'PDF barcode tidak dapat dibuat: ' + (e && e.message ? e.message : e), 'error');
+            }
+        }
+
+        /**
+         * Cetak langsung lewat jendela terpisah — pola yang sama dengan cetak
+         * barcode per item, sehingga gaya cetak halaman utama tidak terpengaruh.
+         */
+        function printBarcodeSheet() {
+            if (_bsBusy)          return showAlert('Sedang Diproses', 'Barcode masih disiapkan. Tunggu sebentar lalu coba lagi.', 'info');
+            if (!_bsLabels.length) return showAlert('Tidak Ada Data', 'Tidak ada item AKTIF yang bisa dicetak.', 'info');
+
+            const L       = _bsLayout();
+            const perPage = L.cols * L.rows;
+            const pages   = Math.ceil(_bsLabels.length / perPage);
+            let sheets = '';
+            for (let p = 0; p < pages; p++) {
+                sheets += _bsPaperHtml(_bsLabels.slice(p * perPage, (p + 1) * perPage), L, true);
+            }
+
+            const win = window.open('', '_blank');
+            if (!win) {
+                return showAlert('Popup Terblokir', 'Harap izinkan popup browser untuk mencetak, atau gunakan tombol Download PDF A4.', 'warning');
+            }
+            win.document.write(
+                '<html><head><meta charset="UTF-8"><title>Barcode Item Aktif</title><style>' +
+                '@page { size: A4 portrait; margin: 0; }' +
+                'html, body { margin:0; padding:0; background:#fff; }' +
+                '.bs-paper { width:210mm; height:297mm; box-sizing:border-box; display:grid; gap:0; page-break-after:always; break-after:page; }' +
+                '.bs-paper:last-child { page-break-after:auto; break-after:auto; }' +
+                '.bs-cell { display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; overflow:hidden; padding:1.5mm; color:#000; font-family:"Times New Roman", Times, serif; }' +
+                '.bs-code { font-weight:700; line-height:1.1; margin-bottom:1.6mm; word-break:break-all; }' +
+                '.bs-img { display:block; image-rendering:pixelated; }' +
+                '.bs-name { font-weight:700; line-height:1.2; margin-top:1.6mm; }' +
+                '.bs-uom { line-height:1.15; margin-top:0.8mm; color:#333; }' +
+                '</style></head><body>' + sheets + '</body></html>'
+            );
+            win.document.close();
+
+            // Cetak dijalankan setelah seluruh gambar barcode benar-benar termuat.
+            const cetak = () => {
+                if (cetak._sudah) return;
+                cetak._sudah = true;
+                try { win.focus(); win.print(); } catch (e) {}
+            };
+            if (win.document.readyState === 'complete') setTimeout(cetak, 300);
+            else win.onload = () => setTimeout(cetak, 300);
+            setTimeout(cetak, 3000);
         }
 
         // ===================== EXPORT REPORT (PDF & EXCEL) =====================
