@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>SIGAP - Cafe Gading Inventory</title>
+<title>SIGAP - Cafe XXI Inventory</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body { width: 100%; height: 100%; overflow: hidden; }
@@ -11,6 +11,15 @@
 </style>
 </head>
 <body>
-<iframe src="https://script.google.com/macros/s/AKfycbwwSrisKW7V8-eDqU7is9R78-oitvEmwWwp2JzKf6OsCtBaNejlydCP1RA_nQmgJ-nJ/exec"></iframe>
+<!-- PENTING: allow="camera" WAJIB ada.
+     Izin kamera didelegasikan PER LAPIS iframe. Tanpa atribut ini,
+     navigator.mediaDevices.getUserMedia() di dalam SIGAP selalu gagal
+     dengan "NotAllowedError: Permission denied" — walaupun user sudah
+     mengizinkan kamera di browser. Akibatnya Scan Barcode live mati
+     dan aplikasi jatuh ke mode foto. -->
+<iframe
+  src="https://script.google.com/macros/s/AKfycbwkhBp3fAvsXn-4WcQhfqk337awx5w8mqzR9JTIqrfoAWBy74rWagqEef-CbKwDFJwlGQ/exec"
+  allow="camera; fullscreen"
+  allowfullscreen></iframe>
 </body>
 </html>
