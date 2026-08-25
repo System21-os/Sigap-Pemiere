@@ -957,6 +957,50 @@
         }
         .ks-year-pill:hover { border-color:var(--accent-brd); color:var(--accent); }
         .ks-year-pill.active { background:var(--accent); border-color:var(--accent); color:#fff; box-shadow:0 3px 10px var(--accent-glow); }
+
+        /* ================================================================
+           [UPGRADE] EXP MONITOR — PEMILIH TAMPILAN: KALENDER / TABEL
+           Saat mode tabel aktif, navigasi bulan & legenda kalender di header
+           disembunyikan; judul mode tabel yang tampil menggantikannya.
+           ================================================================ */
+        .exp-view-switch { display:inline-flex; background:var(--surface2); border:1px solid var(--border); border-radius:10px; padding:3px; gap:3px; }
+        .exp-view-switch button {
+            display:inline-flex; align-items:center; gap:5px; padding:6px 11px; border:none; border-radius:8px;
+            background:transparent; color:var(--text-muted); font-family:var(--font-body); font-size:0.73rem;
+            font-weight:700; cursor:pointer; transition:background 0.18s, color 0.18s;
+        }
+        .exp-view-switch button:hover { color:var(--accent); }
+        .exp-view-switch button.active { background:var(--accent); color:#fff; box-shadow:0 2px 8px var(--accent-glow); }
+
+        /* Legenda kalender ikut disembunyikan saat mode tabel. Navigasi bulan &
+           judul mode tabel diatur lewat JS (elemennya memakai inline style). */
+        #exp-view-card.mode-table .card-header .cal-chip { display:none; }
+
+        /* Chip netral untuk ringkasan grup bulan — sengaja BUKAN .cal-chip-done
+           yang bergaya coret (itu penanda batch selesai, bukan penghitung). */
+        .emh-chip {
+            font-size:0.62rem; font-weight:800; border-radius:6px; padding:2px 6px; line-height:1.3;
+            white-space:nowrap; background:var(--surface2); color:var(--text-dim); border:1px solid var(--border);
+        }
+
+        /* Baris judul grup BULAN TAHUN di dalam tabel */
+        .exp-month-hdr {
+            display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;
+            padding:10px 16px; cursor:pointer; user-select:none; transition:background 0.2s;
+            background:linear-gradient(90deg, var(--accent-soft) 0%, transparent 100%);
+        }
+        .exp-month-hdr:hover { background:var(--accent-soft2); }
+        .exp-month-hdr .emh-title {
+            display:flex; align-items:center; gap:8px; font-size:0.8rem; font-weight:800;
+            color:var(--text); letter-spacing:0.03em; text-transform:uppercase;
+        }
+        .exp-month-hdr.is-now .emh-title { color:var(--accent); }
+        .exp-month-hdr .emh-meta { display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
+        .exp-now-tag {
+            font-size:0.62rem; font-weight:800; letter-spacing:0.04em; text-transform:uppercase;
+            background:var(--accent-soft); color:var(--accent); border:1px solid var(--accent-brd);
+            border-radius:99px; padding:2px 8px;
+        }
         .ks-stat { display:flex; flex-direction:column; gap:2px; }
         .ks-stat .ks-stat-lbl { font-size:0.68rem; font-weight:700; letter-spacing:0.06em; text-transform:uppercase; color:var(--text-dim); }
         .ks-stat .ks-stat-val { font-size:1.35rem; font-weight:800; font-variant-numeric:tabular-nums; line-height:1.1; }
@@ -1270,7 +1314,7 @@
             header > div:first-child { height:58px; padding:0 14px; gap:9px; }
             header > div:first-child > div:nth-child(3) { flex:1 1 auto; min-width:0; overflow:hidden; }
             header h1 { font-size:1rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-            header h1 span { display:none; }   /* "· PREMIERE Gading" disembunyikan agar judul tidak turun baris */
+            header h1 span { display:none; }   /* "· PREMIERE KELAPA GADING" disembunyikan agar judul tidak turun baris */
             header p { font-size:0.56rem !important; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 
             /* Input & tombol: target sentuh besar, font 16px anti auto-zoom iOS */
@@ -1785,7 +1829,7 @@
            Prioritas operasional, disusun ulang lewat CSS (DOM tidak diduplikasi):
              ROW 1  SKU Aktif      |  Scan Barcode
              ROW 2  Barang Masuk   |  Barang Keluar
-             ROW 3  Perlu Restock  |  Exp Kritis  |  Keluar Hari Ini  |  Stock Opname
+             ROW 3  Perlu Restock  |  Exp Kritis  |  Kartu Stock Detail  |  Stock Opname
            ================================================================ */
         body.role-keeper .dash-grids {
             display: grid;
@@ -1801,7 +1845,7 @@
         body.role-keeper #dash-qt-out       { order: 4; grid-column: span 2; }
         body.role-keeper #dash-kpi-low-card { order: 5; }
         body.role-keeper #dash-kpi-exp-card { order: 6; }
-        body.role-keeper #dash-kpi-out-card { order: 7; }
+        body.role-keeper #dash-kpi-ks-card  { order: 7; }
         body.role-keeper #dash-qt-opname    { order: 8; }
 
         /* Tile lebar (2 kolom) memakai susunan ikon + teks agar tidak kosong melompong */
@@ -2206,7 +2250,7 @@
             <div style="display:flex; flex-direction:column; align-items:center; gap:8px; text-align:center;">
                 <i class="ph-fill ph-package" style="color:var(--accent); font-size:2.6rem;"></i>
                 <h1 style="font-size:1.5rem; font-weight:800; color:var(--text); margin:0; letter-spacing:-0.02em;">SIGAP</h1>
-                <p style="font-size:0.72rem; font-weight:700; color:var(--text-dim); margin:0; letter-spacing:0.08em; text-transform:uppercase;">PREMIERE Gading Inventory · Login</p>
+                <p style="font-size:0.72rem; font-weight:700; color:var(--text-dim); margin:0; letter-spacing:0.08em; text-transform:uppercase;">PREMIERE KELAPA GADING Inventory · Login</p>
             </div>
             <div>
                 <label class="lbl">Username</label>
@@ -2968,7 +3012,7 @@
             <div class="logo-dot"></div>
             <i class="ph-fill ph-package" style="color:var(--hdr-gold); font-size:1.75rem;"></i>
             <div>
-                <h1 style="font-size:1.1rem; font-weight:800; color:var(--hdr-title); margin:0; line-height:1.15; letter-spacing:-0.02em;">SIGAP <span style="color:var(--hdr-sub); font-weight:600;">· PREMIERE Gading</span></h1>
+                <h1 style="font-size:1.1rem; font-weight:800; color:var(--hdr-title); margin:0; line-height:1.15; letter-spacing:-0.02em;">SIGAP <span style="color:var(--hdr-sub); font-weight:600;">· PREMIERE KELAPA GADING</span></h1>
                 <p style="font-size:0.66rem; font-weight: 300; color:var(--hdr-sub); margin:0; letter-spacing:0.08em; text-transform:uppercase;">System Inventory gudang Andal dan Persisi</p>
             </div>
             <button id="theme-toggle" class="theme-toggle" onclick="toggleTheme()" title="Ganti mode terang / gelap" style="margin-left:auto;">
@@ -3053,16 +3097,18 @@
                         <div class="kpi-top"><div class="kpi-chip"><i class="ph ph-calendar-x"></i></div><span class="kpi-trend down" id="dash-kpi-exp-trend"><i class="ph ph-warning-circle"></i> urgent</span></div>
                         <div><div class="kpi-value" id="dash-kpi-exp">0</div><div class="kpi-label">Exp Kritis</div><div class="kpi-sub" id="dash-kpi-exp-sub">expired + &le; 7 hari</div></div>
                     </div>
-                    <div class="kpi-card" id="dash-kpi-out-card" style="--kpi:var(--green);" onclick="switchTab('tab-riwayat-keluar')">
-                        <div class="kpi-top"><div class="kpi-chip"><i class="ph ph-upload-simple"></i></div><span class="kpi-trend flat" id="dash-kpi-out-trend">hari ini</span></div>
-                        <div><div class="kpi-value" id="dash-kpi-out">0</div><div class="kpi-label">Keluar Hari Ini</div><div class="kpi-sub" id="dash-kpi-out-sub">0 unit</div></div>
+                    <!-- [UPGRADE] Menggantikan kartu "Keluar Hari Ini": pintasan langsung ke
+                         KARTU STOCK DETAIL (riwayat masuk & keluar per item). -->
+                    <div class="kpi-card" id="dash-kpi-ks-card" style="--kpi:var(--purple);" onclick="_dashGoKsDetail()" title="Buka Kartu Stock Detail — telusuri riwayat masuk & keluar per item">
+                        <div class="kpi-top"><div class="kpi-chip"><i class="ph ph-identification-card"></i></div><span class="kpi-trend flat" id="dash-kpi-ks-trend"><i class="ph ph-arrow-square-out"></i> telusuri</span></div>
+                        <div><div class="kpi-value" id="dash-kpi-ks">0</div><div class="kpi-label">Kartu Stock Detail</div><div class="kpi-sub" id="dash-kpi-ks-sub">riwayat per item</div></div>
                     </div>
                 </div>
 
                 <div class="quick-grid">
                     <button type="button" class="quick-tile" id="dash-qt-out" onclick="openOutFormModal()"><div class="quick-ico" style="background:var(--accent-soft); color:var(--accent);"><i class="ph ph-upload-simple"></i></div><b>Barang Keluar</b><span>Catat transaksi keluar</span></button>
                     <button type="button" class="quick-tile" id="dash-qt-in" onclick="openInboundModal()"><div class="quick-ico" style="background:var(--green-soft); color:var(--green);"><i class="ph ph-download-simple"></i></div><b>Barang Masuk</b><span>Tambah stok masuk</span></button>
-                    <button type="button" class="quick-tile" id="dash-qt-scan" onclick="openBarcodeScanner('keluar')"><div class="quick-ico" style="background:var(--purple-soft); color:var(--purple);"><i class="ph ph-barcode"></i></div><b>Scan Barcode</b><span>Cari item cepat</span></button>
+                    <button type="button" class="quick-tile" id="dash-qt-scan" onclick="openBarcodeScanner('log')"><div class="quick-ico" style="background:var(--purple-soft); color:var(--purple);"><i class="ph ph-barcode"></i></div><b>Scan Barcode</b><span>Langsung ke log item</span></button>
                     <button type="button" class="quick-tile" id="dash-qt-opname" data-sub-default="Hitung fisik stok" data-sub-keeper="Dikelola Manager / Admin" onclick="switchTab('tab-opname')"><div class="quick-ico" style="background:var(--amber-soft); color:var(--amber);"><i class="ph ph-clipboard-text"></i></div><b>Stock Opname</b><span>Hitung fisik stok</span></button>
                 </div>
                 </div><!-- /#dash-grids -->
@@ -3628,16 +3674,25 @@
                 </div>
 
                 <div class="exp-duo">
-                <div class="card">
+                <div class="card" id="exp-view-card">
                     <div class="card-header">
                         <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px;">
-                            <div style="display:flex; align-items:center; gap:10px;">
+                            <!-- [UPGRADE] Judul mode TABEL — menggantikan navigasi bulan saat tampilan tabel aktif -->
+                            <h2 id="exp-tbl-nav" style="display:none; align-items:center; gap:8px; font-size:1rem; font-weight:800; color:var(--text); margin:0;">
+                                <i class="ph ph-list-bullets" style="color:var(--accent);"></i> Daftar Expired per Bulan
+                            </h2>
+                            <div style="display:flex; align-items:center; gap:10px;" id="exp-cal-nav">
                                 <button class="cal-nav-btn" onclick="calShiftMonth(-1)"><i class="ph ph-caret-left"></i></button>
                                 <h2 id="cal-month-label" style="font-size:1rem; font-weight:800; color:var(--text); margin:0; min-width:150px; text-align:center;"></h2>
                                 <button class="cal-nav-btn" onclick="calShiftMonth(1)"><i class="ph ph-caret-right"></i></button>
                                 <button onclick="calGoToday()" class="btn-ghost" style="font-size:0.72rem; padding:7px 12px;">Hari Ini</button>
                             </div>
                             <div style="display:flex; gap:6px; flex-wrap:wrap; align-items:center;">
+                                <!-- [UPGRADE] Pindah tampilan: Kalender <-> Tabel -->
+                                <div class="exp-view-switch" role="group" aria-label="Tampilan Exp Monitor">
+                                    <button type="button" id="exp-view-btn-calendar" class="active" onclick="setExpView('calendar')"><i class="ph ph-calendar-blank"></i> Kalender</button>
+                                    <button type="button" id="exp-view-btn-table" onclick="setExpView('table')"><i class="ph ph-list-bullets"></i> Tabel</button>
+                                </div>
                                 <span class="cal-chip cal-chip-expired">Expired</span>
                                 <span class="cal-chip cal-chip-soon">≤ 7 hari</span>
                                 <span class="cal-chip cal-chip-ok">&gt; 7 hari</span>
@@ -3645,9 +3700,38 @@
                             </div>
                         </div>
                     </div>
-                    <div style="padding:14px 16px;">
+                    <div style="padding:14px 16px;" id="exp-cal-view">
                         <div class="cal-grid" id="cal-dow-row"></div>
                         <div class="cal-grid" id="cal-grid" style="margin-top:6px;"></div>
+                    </div>
+
+                    <!-- [UPGRADE] TAMPILAN TABEL — grouping per BULAN TAHUN.
+                         Sumber data & perhitungan statusnya sama persis dengan
+                         kalender (globalExpData); hanya penyajiannya yang berbeda. -->
+                    <div id="exp-table-view" style="display:none;">
+                        <div style="padding:12px 16px; display:flex; flex-wrap:wrap; gap:10px; align-items:center; justify-content:space-between; border-bottom:1px solid var(--border);">
+                            <div style="display:flex; flex-wrap:wrap; gap:6px; align-items:center;">
+                                <span style="font-size:0.72rem; font-weight:800; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.05em;">Tahun</span>
+                                <div id="exp-year-pills" style="display:flex; flex-wrap:wrap; gap:6px;"></div>
+                            </div>
+                            <span id="exp-table-summary" style="font-size:0.75rem; color:var(--text-dim); font-weight:600;"></span>
+                        </div>
+                        <div style="overflow-x:auto; max-height:620px; overflow-y:auto;">
+                            <table class="data-table">
+                                <thead>
+                                    <tr>
+                                        <th>Nama Item</th>
+                                        <th>Exp Date</th>
+                                        <th style="text-align:center;">Sisa Hari</th>
+                                        <th>Tgl Masuk</th>
+                                        <th>No DO</th>
+                                        <th style="text-align:right;">QTY</th>
+                                        <th style="text-align:center;">Status Barang</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="exp-month-tbody"></tbody>
+                            </table>
+                        </div>
                     </div>
                 </div>
 
@@ -4403,7 +4487,13 @@
             }
             if (tabId === 'tab-exp') {
                 if (globalExpData.length === 0) loadExpData();
-                else { renderExpStats(); renderCalendar(); }
+                else { renderExpStats(); _rerenderExpViews(); }
+                // [UPGRADE] Pulihkan pilihan tampilan terakhir (kalender / tabel) sekali saja.
+                if (!_expViewInit) {
+                    _expViewInit = true;
+                    const v = safeStore.get('EXP_VIEW');
+                    if (v && v !== _expView) setExpView(v);
+                }
             }
         }
 
@@ -5787,6 +5877,7 @@ let currentGroup = '', groupId = 0;
         // ============================================================
         const _ksState = { year: null, item: null, sortAsc: true };
         let _ksItemTom = null;    // instance TomSelect dropdown item
+        let _ksPendingItem = null; // item yang diminta dari luar (mis. hasil scan barcode)
         let _ksIndex   = null;    // Map: namaItem -> [pergerakan...] (urut ASC)
         let _ksRows    = [];      // baris terfilter aktif (urut ASC) untuk export
 
@@ -5805,6 +5896,19 @@ let currentGroup = '', groupId = 0;
                 _ksBuildItemSelect();
                 _ksRender();
             });
+        }
+
+        /**
+         * [UPGRADE] Buka Kartu Stock Detail LANGSUNG pada item tertentu.
+         * Dipakai hasil scan barcode dari Dashboard. Filter kategori direset ke
+         * "Semua" lebih dulu supaya item hasil scan pasti ada di daftar pilihan.
+         */
+        function _openKsDetailForItem(namaItem) {
+            if (typeof _canAccess === 'function' && !_canAccess('tab-stock')) return _denyAccess('Kartu Stock');
+            const kat = document.getElementById('ks-kategori');
+            if (kat) kat.value = 'ALL';
+            _ksPendingItem = namaItem || null;
+            openKsDetail();
         }
 
         function closeKsDetail() {
@@ -5856,22 +5960,38 @@ let currentGroup = '', groupId = 0;
             };
             (globalInboundData || []).forEach(r => {
                 if (!r.namaItem) return;
+                const noDoStr  = (r.noDo || '').toString().trim();
+                const noPgrStr = (r.noPgr || '').toString().trim();
+                const isAwal   = (noPgrStr.toUpperCase() === "STOCK AWAL") || (noDoStr.toUpperCase().indexOf("MIGRASI") !== -1);
                 push(r.namaItem, {
-                    rawDate: r.rawDate || 0, tanggal: r.tanggal || '', jenis: 'IN',
-                    qty: parseFloat(r.qty) || 0, noDo: r.noDo || '',          // No. Invoice = No DO (halaman Masuk)
-                    expDate: r.expDate || '', altUom: r.altUom || '', uom: r.uom || ''
+                    rawDate: r.rawDate || 0,
+                    tanggal: r.tanggal || '',
+                    jenis:   isAwal ? 'AWAL' : 'IN',
+                    qty:     parseFloat(r.qty) || 0,
+                    noDo:    noDoStr,          // No. Invoice = No DO (halaman Masuk)
+                    expDate: r.expDate || '',
+                    altUom:  r.altUom || '',
+                    uom:     r.uom || '',
+                    noPgr:   noPgrStr,
+                    isAwal:  isAwal
                 });
             });
             (globalOutboundData || []).forEach(r => {
                 if (!r.namaItem) return;
                 push(r.namaItem, {
-                    rawDate: r.rawDate || 0, tanggal: r.tanggal || '', jenis: 'OUT',
-                    qty: parseFloat(r.qty) || 0, noDo: r.noSpb || '',
-                    expDate: '', altUom: '', uom: r.uom || ''
+                    rawDate: r.rawDate || 0,
+                    tanggal: r.tanggal || '',
+                    jenis:   'OUT',
+                    qty:     parseFloat(r.qty) || 0,
+                    noDo:    r.noSpb || '',
+                    expDate: '',
+                    altUom:  '',
+                    uom:     r.uom || '',
+                    isAwal:  false
                 });
             });
-            // Urut kronologis ASC sekali; bila tanggal sama, IN didahulukan agar saldo intuitif.
-            _ksIndex.forEach(arr => arr.sort((a, b) => (a.rawDate - b.rawDate) || (a.jenis === b.jenis ? 0 : (a.jenis === 'IN' ? -1 : 1))));
+            // Urut kronologis ASC sekali; bila tanggal sama, AWAL didahulukan sebelum IN & OUT.
+            _ksIndex.forEach(arr => arr.sort((a, b) => (a.rawDate - b.rawDate) || (a.jenis === b.jenis ? 0 : (a.jenis === 'AWAL' ? -2 : (a.jenis === 'IN' ? -1 : 1)))));
         }
 
         // THN: hanya tahun yang benar-benar ada di data (+ tahun berjalan), urut menaik.
@@ -5913,8 +6033,11 @@ let currentGroup = '', groupId = 0;
             uniq.sort((a, b) => stripCode(a.namaItem).toLowerCase().localeCompare(stripCode(b.namaItem).toLowerCase(), 'id'));
 
             const options = uniq.map(it => ({ value: it.namaItem, text: stripCode(it.namaItem) }));
-            const prev    = _ksState.item;
+            // [UPGRADE] Item yang diminta dari luar (hasil scan barcode) diprioritaskan
+            // di atas pilihan sebelumnya; setelah dipakai, permintaannya dibersihkan.
+            const prev    = _ksPendingItem || _ksState.item;
             const nextSel = (prev && options.some(o => o.value === prev)) ? prev : (options[0] ? options[0].value : null);
+            _ksPendingItem = null;
             _ksState.item = nextSel;
 
             if (window.TomSelect) {
@@ -5981,10 +6104,22 @@ let currentGroup = '', groupId = 0;
             const moves   = (_ksIndex && _ksIndex.get(item)) ? _ksIndex.get(item) : [];
             const stk     = _stockIndex ? _stockIndex.get(item) : null;
             const baseUom = stk ? (stk.uom || '') : ((_masterIndex && _masterIndex.get(item)) ? (_masterIndex.get(item).uom || '') : '');
-            let running   = stk ? (parseFloat(stk.awal) || 0) : 0;
+            
+            // Cek apakah di daftar pergerakan (moves) sudah memuat transaksi AWAL / MIGRASI
+            const hasAwalMove = moves.some(m => m.jenis === 'AWAL');
+            // Jika ada baris AWAL di moves, running diinisialisasi 0 (karena baris AWAL di moves yang menambah saldo pertama kali).
+            // Jika tidak ada baris AWAL di moves, running mengambil dari stk.awal.
+            let running   = hasAwalMove ? 0 : (stk ? (parseFloat(stk.awal) || 0) : 0);
 
             // Saldo berjalan dihitung kronologis ASC → carry-forward benar walau difilter per bulan.
-            const withBal = moves.map(m => { running += (m.jenis === 'IN' ? m.qty : -m.qty); return { m, sisa: running }; });
+            const withBal = moves.map(m => {
+                if (m.jenis === 'AWAL' || m.jenis === 'IN') {
+                    running += m.qty;
+                } else {
+                    running -= m.qty;
+                }
+                return { m, sisa: running };
+            });
 
             // Filter periode (THN + BLN)
             const y  = _ksState.year;
@@ -5997,9 +6132,12 @@ let currentGroup = '', groupId = 0;
                 return true;
             });
 
-            // Total IN/OUT pada periode terfilter
+            // Total IN/OUT pada periode terfilter (Hanya hitung transaksi IN reguler untuk Total Masuk, transaksi AWAL tidak diduplikasi)
             let tin = 0, tout = 0;
-            disp.forEach(rec => { if (rec.m.jenis === 'IN') tin += rec.m.qty; else tout += rec.m.qty; });
+            disp.forEach(rec => {
+                if (rec.m.jenis === 'IN') tin += rec.m.qty;
+                else if (rec.m.jenis === 'OUT') tout += rec.m.qty;
+            });
             inEl.textContent  = '+' + formatID(tin);
             outEl.textContent = '−' + formatID(tout);
 
@@ -6016,20 +6154,24 @@ let currentGroup = '', groupId = 0;
             const frag = document.createDocumentFragment();
             view.forEach(rec => {
                 const m      = rec.m;
+                const isAwal = m.jenis === 'AWAL';
                 const isIn   = m.jenis === 'IN';
-                const hasExp = isIn && m.expDate;
+                const hasExp = (isIn || isAwal) && m.expDate;
                 const expVal = hasExp ? formatExpDate(m.expDate) : '—';
                 const expSt  = hasExp ? getExpDateStyle(m.expDate) : '';
+                const masukCol = isAwal 
+                    ? `<span style="color:var(--amber); font-weight:700;" title="Stock Awal (Migrasi)">+${formatID(m.qty)}</span>`
+                    : (isIn ? `+${formatID(m.qty)}` : '');
                 const tr = document.createElement('tr');
                 tr.innerHTML = `
                     <td style="color:var(--text-muted); font-weight:600; font-size:0.8rem; white-space:nowrap;">${m.tanggal || '—'}</td>
                     <td class="mono">${(m.noDo && m.noDo.toString().trim()) ? m.noDo : '—'}</td>
                     <td><span style="${expSt}">${expVal}</span></td>
-                    <td style="text-align:center; font-weight:800; color:var(--green);">${isIn ? '+' + formatID(m.qty) : ''}</td>
-                    <td style="text-align:center; font-weight:800; color:var(--red);">${!isIn ? '−' + formatID(m.qty) : ''}</td>
+                    <td style="text-align:center; font-weight:800; color:${isAwal ? 'var(--amber)' : 'var(--green)'};">${masukCol}</td>
+                    <td style="text-align:center; font-weight:800; color:var(--red);">${(!isIn && !isAwal) ? '−' + formatID(m.qty) : ''}</td>
                     <td style="text-align:center;" class="${rec.sisa < 0 ? 'sisa-neg' : 'sisa-pos'}">${formatID(rec.sisa)}</td>
                     <td style="color:var(--text-muted); font-size:0.8rem;">${m.uom || baseUom || '—'}</td>
-                    <td style="color:var(--text-dim); font-size:0.8rem;">${isIn ? (m.altUom || '—') : '—'}</td>`;
+                    <td style="color:var(--text-dim); font-size:0.8rem;">${(isIn || isAwal) ? (m.altUom || '—') : '—'}</td>`;
                 frag.appendChild(tr);
             });
             tbody.innerHTML = '';
@@ -6042,19 +6184,24 @@ let currentGroup = '', groupId = 0;
             const mo         = document.getElementById('ks-month').value;
             const monthLabel = (mo === 'ALL') ? 'Semua Bulan' : MONTHS_ID[parseInt(mo, 10)];
             let tin = 0, tout = 0;
-            _ksRows.forEach(r => { if (r.jenis === 'IN') tin += r.qty; else tout += r.qty; });
+            _ksRows.forEach(r => {
+                if (r.jenis === 'IN') tin += r.qty;
+                else if (r.jenis === 'OUT') tout += r.qty;
+            });
             const body = _ksRows.map(r => {
-                const isIn = r.jenis === 'IN';
-                const exp  = (isIn && r.expDate) ? formatExpDate(r.expDate) : '';
+                const isAwal = r.jenis === 'AWAL';
+                const isIn   = r.jenis === 'IN';
+                const exp    = ((isIn || isAwal) && r.expDate) ? formatExpDate(r.expDate) : '';
+                const masukTxt = isAwal ? formatID(r.qty) : (isIn ? formatID(r.qty) : '');
                 return `<tr>
                     <td>${r.tanggal || ''}</td>
                     <td>${(r.noDo && r.noDo.toString().trim()) ? r.noDo : ''}</td>
                     <td>${exp}</td>
-                    <td style="text-align:right; color:#16a34a;">${isIn ? formatID(r.qty) : ''}</td>
-                    <td style="text-align:right; color:#dc2626;">${!isIn ? formatID(r.qty) : ''}</td>
+                    <td style="text-align:right; color:${isAwal ? '#b45309' : '#16a34a'};">${masukTxt}</td>
+                    <td style="text-align:right; color:#dc2626;">${(!isIn && !isAwal) ? formatID(r.qty) : ''}</td>
                     <td style="text-align:right;">${formatID(r.sisa)}</td>
                     <td>${r.uomShown || ''}</td>
-                    <td>${isIn ? (r.altUom || '') : ''}</td>
+                    <td>${(isIn || isAwal) ? (r.altUom || '') : ''}</td>
                 </tr>`;
             }).join('');
             return `<div style="font-family:Arial, sans-serif; color:#111;">
@@ -8201,6 +8348,9 @@ let currentGroup = '', groupId = 0;
                         mode = 'keluar';
                     } else if (document.getElementById('tab-masuk').classList.contains('active')) {
                         mode = 'masuk';
+                    } else if (document.getElementById('tab-dashboard').classList.contains('active')) {
+                        // [UPGRADE] Sama seperti tile Scan Barcode di Dashboard.
+                        mode = 'log';
                     }
                     _scanTarget = { mode, inputId };
                     _onBarcodeScanned(barcodeBuffer);
@@ -8402,6 +8552,15 @@ let currentGroup = '', groupId = 0;
                     document.getElementById('in-qty').focus();
                     _scanFeedback(true, stripCode(item.namaItem));
                 }
+            } else if (_scanTarget && _scanTarget.mode === 'log') {
+                // [UPGRADE] Scan dari Dashboard: sekali scan langsung membuka
+                // Kartu Stock Detail (log) item yang cocok. Scan di form Keluar /
+                // Masuk TIDAK ikut berubah — tetap mengisi dropdown transaksi.
+                if (!item) {
+                    return showAlert('Tidak Ditemukan', 'Barcode "' + text + '" tidak cocok dengan item master manapun.', 'warning');
+                }
+                _scanFeedback(true, stripCode(item.namaItem));
+                _openKsDetailForItem(item.namaItem);
             } else if (_scanTarget && _scanTarget.mode === 'search') {
                 const inp = document.getElementById(_scanTarget.inputId);
                 if (!inp) return;
@@ -8474,10 +8633,75 @@ let currentGroup = '', groupId = 0;
         // Wrapper ini mencegah error fatal: fallback ke memori (sesi tab saja).
         const _memStore = {};
         const safeStore = {
-            get(k)    { try { return localStorage.getItem(k); } catch (e) { return (k in _memStore) ? _memStore[k] : null; } },
-            set(k, v) { try { localStorage.setItem(k, v); } catch (e) { _memStore[k] = v; } },
-            remove(k) { try { localStorage.removeItem(k); } catch (e) { delete _memStore[k]; } }
+            get(k) {
+                let v = null;
+                try { v = localStorage.getItem(k); } catch (e) { v = null; }
+                if (v === null || v === undefined) v = (k in _memStore) ? _memStore[k] : null;
+                return v;
+            },
+            set(k, v) {
+                _memStore[k] = v;                            // salinan memori selalu ada
+                try { localStorage.setItem(k, v); } catch (e) {}
+            },
+            remove(k) {
+                delete _memStore[k];
+                try { localStorage.removeItem(k); } catch (e) {}
+            }
         };
+
+        // ============ [UPGRADE] PENYIMPANAN TOKEN SESI (LOGIN PERMANEN) ============
+        // Sesi di server tidak punya masa berlaku, jadi yang perlu dijaga di sisi
+        // browser hanyalah TOKEN-nya. Token disimpan BERLAPIS supaya tetap ada
+        // walau salah satu media diblokir browser:
+        //   1) localStorage   → paling tahan lama (utama)
+        //   2) cookie         → cadangan bila localStorage diblokir
+        //   3) sessionStorage → cadangan berikutnya (bertahan selama tab hidup)
+        //   4) memori         → benar-benar terakhir
+        // Token HANYA dihapus lewat clearAuthToken(), yaitu saat user menekan
+        // Keluar atau saat server memastikan sesi sudah dicabut.
+        const TOKEN_KEY            = 'AUTH_TOKEN';
+        const TOKEN_COOKIE_MAX_AGE = 60 * 60 * 24 * 3650;   // 10 tahun
+        let   _authTokenMemo       = '';
+
+        function _cookieGet(k) {
+            try {
+                const m = document.cookie.match('(?:^|;\\s*)' + k + '=([^;]*)');
+                return m ? decodeURIComponent(m[1]) : null;
+            } catch (e) { return null; }
+        }
+        function _cookieSet(k, v) {
+            try {
+                document.cookie = k + '=' + encodeURIComponent(v) +
+                    '; path=/; max-age=' + TOKEN_COOKIE_MAX_AGE + '; SameSite=None; Secure';
+            } catch (e) {}
+        }
+        function _cookieRemove(k) {
+            try { document.cookie = k + '=; path=/; max-age=0; SameSite=None; Secure'; } catch (e) {}
+        }
+
+        /** Simpan token ke semua lapisan yang tersedia. */
+        function saveAuthToken(token) {
+            _authTokenMemo = token || '';
+            if (!token) return;
+            safeStore.set(TOKEN_KEY, token);
+            try { sessionStorage.setItem(TOKEN_KEY, token); } catch (e) {}
+            _cookieSet(TOKEN_KEY, token);
+        }
+        /** Ambil token dari lapisan mana pun yang masih menyimpannya. */
+        function loadAuthToken() {
+            let t = safeStore.get(TOKEN_KEY);
+            if (!t) { try { t = sessionStorage.getItem(TOKEN_KEY); } catch (e) { t = null; } }
+            if (!t) t = _cookieGet(TOKEN_KEY);
+            if (t) saveAuthToken(t);       // pulihkan ke lapisan lain yang kosong
+            return t || '';
+        }
+        /** Hapus token dari semua lapisan — dipakai saat user benar-benar logout. */
+        function clearAuthToken() {
+            _authTokenMemo = '';
+            safeStore.remove(TOKEN_KEY);
+            try { sessionStorage.removeItem(TOKEN_KEY); } catch (e) {}
+            _cookieRemove(TOKEN_KEY);
+        }
 
         // ===================== AUTH & ROLE =====================
         let currentUser = null;
@@ -8531,7 +8755,8 @@ let currentGroup = '', groupId = 0;
         // Seluruh pemanggilan function sensitif menyertakan token sesi supaya
         // backend dapat memverifikasi role (requireRole_).
         function _authToken() {
-            return safeStore.get('AUTH_TOKEN') || '';
+            if (!_authTokenMemo) _authTokenMemo = loadAuthToken();
+            return _authTokenMemo || '';
         }
         function _withAuth(payload) {
             const p = payload || {};
@@ -8548,16 +8773,43 @@ let currentGroup = '', groupId = 0;
         }
 
         function initAuth() {
-            const token = safeStore.get('AUTH_TOKEN');
+            const token = _authToken();
             if (!token) return _showLoginScreen();
             showLoader(true);
+            _verifySession(token, 0);
+        }
+
+        /**
+         * [UPGRADE] Verifikasi sesi permanen.
+         * Token HANYA dibuang bila backend memastikan sesi sudah tidak berlaku
+         * (res.sessionInvalid) — misalnya user sudah logout di tempat lain atau
+         * akunnya dinonaktifkan admin. Gangguan koneksi / error sementara TIDAK
+         * boleh membuat user ter-logout: dicoba ulang beberapa kali, dan token
+         * tetap tersimpan supaya sesi pulih sendiri saat aplikasi dibuka lagi.
+         */
+        function _verifySession(token, attempt) {
+            const gagal = () => {
+                if (attempt < 2) { setTimeout(() => _verifySession(token, attempt + 1), 1500); return; }
+                showLoader(false);
+                _showLoginScreen();   // token sengaja TIDAK dihapus
+            };
             google.script.run
                 .withSuccessHandler(res => {
-                    showLoader(false);
-                    if (res && res.success) { currentUser = res.user; _startApp(); }
-                    else { safeStore.remove('AUTH_TOKEN'); _showLoginScreen(); }
+                    if (res && res.success) {
+                        showLoader(false);
+                        currentUser = res.user;
+                        _startApp();
+                        return;
+                    }
+                    if (res && res.sessionInvalid) {
+                        showLoader(false);
+                        clearAuthToken();
+                        _showLoginScreen();
+                        return;
+                    }
+                    gagal();
                 })
-                .withFailureHandler(() => { showLoader(false); _showLoginScreen(); })
+                .withFailureHandler(gagal)
                 .checkSession(token);
         }
 
@@ -8584,7 +8836,7 @@ let currentGroup = '', groupId = 0;
                     btn.disabled = false;
                     btn.innerHTML = '<i class="ph ph-sign-in" style="font-size:1.2rem;"></i> Masuk';
                     if (res && res.success) {
-                        safeStore.set('AUTH_TOKEN', res.token);
+                        saveAuthToken(res.token);   // sesi bertahan sampai user menekan Keluar
                         currentUser = res.user;
                         document.getElementById('login-password').value = '';
                         document.getElementById('login-screen').classList.add('hidden');
@@ -8612,9 +8864,9 @@ let currentGroup = '', groupId = 0;
                 background: 'var(--surface)', color: 'var(--text)'
             }).then(result => {
                 if (!result.isConfirmed) return;
-                const token = safeStore.get('AUTH_TOKEN');
+                const token = _authToken();
                 if (token) google.script.run.logoutUser(token); // fire & forget
-                safeStore.remove('AUTH_TOKEN');
+                clearAuthToken();                               // bersihkan SEMUA lapisan token
 
                 // [FIX] JANGAN memakai window.location.reload().
                 // Aplikasi berjalan di dalam IFRAME SANDBOX Apps Script
@@ -8836,12 +9088,14 @@ let currentGroup = '', groupId = 0;
         }
 
         // ===================== [UPGRADE v2] DASHBOARD PER ROLE =====================
-        // STOCK KEEPER: kartu Perlu Restock / Exp Kritis / Keluar Hari Ini / Stock Opname
-        // tetap MENAMPILKAN angkanya, tetapi TIDAK lagi bisa diklik menuju detail.
+        // STOCK KEEPER: kartu Perlu Restock / Exp Kritis / Stock Opname tetap
+        // MENAMPILKAN angkanya, tetapi TIDAK lagi bisa diklik menuju detail.
+        // Kartu Stock Detail SENGAJA tidak masuk daftar ini — Kartu Stock memang
+        // termasuk hak akses STOCK KEEPER.
         // Yang dihilangkan hanya akses View — data & business logic kartu tidak disentuh.
         // Susunan baris (SKU+Scan / Masuk+Keluar / operasional) diatur lewat CSS
         // `body.role-keeper` sehingga tidak ada DOM yang diduplikasi.
-        const _DASH_KEEPER_STATIC = ['dash-kpi-low-card', 'dash-kpi-exp-card', 'dash-kpi-out-card', 'dash-qt-opname'];
+        const _DASH_KEEPER_STATIC = ['dash-kpi-low-card', 'dash-kpi-exp-card', 'dash-qt-opname'];
 
         /** Jadikan sebuah kartu informatif-saja (non-clickable) atau kembalikan seperti semula. */
         function _dashSetCardStatic(el, isStatic) {
@@ -8951,6 +9205,8 @@ let currentGroup = '', groupId = 0;
             updateExpAlerts();
             // Render kalender hanya jika elemennya sudah ada di tab
             if (document.getElementById('cal-grid')) renderCalendar();
+            // [UPGRADE] Tampilan tabel ikut disegarkan bila sedang aktif.
+            if (_expView === 'table' && document.getElementById('exp-month-tbody')) renderExpMonthTable();
             if (_selectedExpDate) renderExpDayPanel(_selectedExpDate);
             if (typeof DashBoot !== 'undefined') DashBoot.tick('exp');
         }
@@ -8965,7 +9221,9 @@ let currentGroup = '', groupId = 0;
             return stripCode(r.namaItem || '').toLowerCase().includes(kw) || (r.namaItem || '').toLowerCase().includes(kw);
         }
         function _rerenderExpViews() {
-            renderCalendar();
+            // Gambar ulang tampilan yang sedang aktif saja.
+            if (_expView === 'table') renderExpMonthTable();
+            else renderCalendar();
             if (_selectedExpDate) renderExpDayPanel(_selectedExpDate);
         }
 
@@ -9188,6 +9446,217 @@ let currentGroup = '', groupId = 0;
             }
             grid.innerHTML = '';
             grid.appendChild(frag);
+        }
+
+        // ============================================================
+        // [UPGRADE] EXP MONITOR — TAMPILAN TABEL (GROUPING PER BULAN)
+        // ------------------------------------------------------------
+        // Alternatif tampilan dari kalender, BUKAN sumber data baru:
+        // memakai globalExpData, _expDayDiff(), dan _expQtyCellHtml() yang
+        // sama persis, jadi angka & status di kedua tampilan selalu sama.
+        // Baris diklik -> membuka panel detail tanggal (tempat status diubah),
+        // sehingga tidak ada logika edit yang diduplikasi di sini.
+        // ============================================================
+        let _expView       = 'calendar';   // 'calendar' | 'table'
+        let _expViewInit   = false;        // preferensi tersimpan sudah dipulihkan?
+        let _expTblYear    = null;         // null = belum ditentukan · number · 'ALL'
+        const _expCollapsedMonths = new Set();
+
+        function setExpView(view) {
+            const next = (view === 'table') ? 'table' : 'calendar';
+            _expView = next;
+
+            const card = document.getElementById('exp-view-card');
+            if (card) card.classList.toggle('mode-table', next === 'table');
+            const calBox = document.getElementById('exp-cal-view');
+            const tblBox = document.getElementById('exp-table-view');
+            if (calBox) calBox.style.display = (next === 'table') ? 'none' : '';
+            if (tblBox) tblBox.style.display = (next === 'table') ? ''     : 'none';
+            const calNav = document.getElementById('exp-cal-nav');
+            const tblNav = document.getElementById('exp-tbl-nav');
+            if (calNav) calNav.style.display = (next === 'table') ? 'none' : 'flex';
+            if (tblNav) tblNav.style.display = (next === 'table') ? 'flex' : 'none';
+            const bc = document.getElementById('exp-view-btn-calendar');
+            const bt = document.getElementById('exp-view-btn-table');
+            if (bc) bc.classList.toggle('active', next !== 'table');
+            if (bt) bt.classList.toggle('active', next === 'table');
+            try { safeStore.set('EXP_VIEW', next); } catch (e) {}
+
+            if (next !== 'table') { renderCalendar(); return; }
+
+            // PRIORITAS TAHUN BERJALAN: pastikan data sejak Januari tahun ini ikut
+            // dimuat. Pola lazy-load-nya sama dengan navigasi mundur di kalender —
+            // render tabel dilakukan _applyExpData() setelah data tiba.
+            const jan = ((typeof getJakartaDate === 'function') ? getJakartaDate() : new Date()).getFullYear() + '-01-01';
+            if (_expLoadedFrom && jan < _expLoadedFrom) { loadExpData(jan); return; }
+            renderExpMonthTable();
+        }
+
+        function _expMonthKey(dateStr)  { return (dateStr || '').slice(0, 7); }
+        function _expMonthLabel(ym) {
+            const p = ym.split('-');
+            return (MONTHS_ID[parseInt(p[1], 10) - 1] || p[1]) + ' ' + p[0];
+        }
+
+        /**
+         * Urutan grup bulan — TAHUN BERJALAN DIDAHULUKAN:
+         *   1) bulan-bulan tahun ini      (Januari -> Desember)
+         *   2) tahun-tahun berikutnya     (menaik)
+         *   3) tahun-tahun sebelumnya     (menurun, yang terbaru lebih dulu)
+         */
+        function _expSortMonthKeys(keys, thisYear) {
+            const rank = ym => {
+                const y = parseInt(ym.slice(0, 4), 10);
+                if (y === thisYear) return 0;
+                return y > thisYear ? 1 : 2;
+            };
+            return keys.slice().sort((a, b) => {
+                const ra = rank(a), rb = rank(b);
+                if (ra !== rb) return ra - rb;
+                return (ra === 2) ? b.localeCompare(a) : a.localeCompare(b);
+            });
+        }
+
+        function _expSetTblYear(y) { _expTblYear = y; renderExpMonthTable(); }
+
+        function _expToggleMonth(ym) {
+            if (_expCollapsedMonths.has(ym)) _expCollapsedMonths.delete(ym);
+            else _expCollapsedMonths.add(ym);
+            renderExpMonthTable();
+        }
+
+        function _expRenderYearPills(years, thisYear) {
+            const box = document.getElementById('exp-year-pills');
+            if (!box) return;
+            const pills = years.map(y =>
+                `<button type="button" class="ks-year-pill${_expTblYear === y ? ' active' : ''}" onclick="_expSetTblYear(${y})">` +
+                `${y}${y === thisYear ? ' \u00b7 tahun ini' : ''}</button>`
+            );
+            pills.push(`<button type="button" class="ks-year-pill${_expTblYear === 'ALL' ? ' active' : ''}" onclick="_expSetTblYear('ALL')">Semua Tahun</button>`);
+            box.innerHTML = pills.join('');
+        }
+
+        /** Label sisa hari — memakai _expDayDiff() yang sama dengan kalender. */
+        function _expSisaHariHtml(r, diff) {
+            if (r.status && r.status !== 'AKTIF') return '<span style="color:var(--text-dim);">\u2014</span>';
+            if (diff < 0)   return `<span class="cal-chip cal-chip-expired">lewat ${Math.abs(diff)} hr</span>`;
+            if (diff === 0) return '<span class="cal-chip cal-chip-soon">hari ini</span>';
+            if (diff <= 7)  return `<span class="cal-chip cal-chip-soon">${diff} hr lagi</span>`;
+            return `<span class="cal-chip cal-chip-ok">${diff} hr lagi</span>`;
+        }
+
+        function renderExpMonthTable() {
+            const tbody = document.getElementById('exp-month-tbody');
+            if (!tbody) return;
+            _recomputeExpFifo();   // sisa FIFO = info tampilan saja, database tidak berubah
+
+            const kw   = _expKeyword();
+            const rows = (globalExpData || []).filter(r => r && r.expDate && _expMatchKeyword(r, kw));
+            const jkt  = (typeof getJakartaDate === 'function') ? getJakartaDate() : new Date();
+            const thisYear = jkt.getFullYear();
+            const nowYm    = thisYear + '-' + String(jkt.getMonth() + 1).padStart(2, '0');
+
+            // Tahun yang benar-benar ada datanya — tahun berjalan jadi pilihan awal.
+            const years = [...new Set(rows.map(r => parseInt(r.expDate.slice(0, 4), 10)).filter(Boolean))].sort((a, b) => a - b);
+            if (_expTblYear === null || (_expTblYear !== 'ALL' && years.length && years.indexOf(_expTblYear) === -1)) {
+                _expTblYear = (years.indexOf(thisYear) !== -1 || !years.length) ? thisYear : years[0];
+            }
+            _expRenderYearPills(years, thisYear);
+
+            const shown = (_expTblYear === 'ALL')
+                ? rows
+                : rows.filter(r => parseInt(r.expDate.slice(0, 4), 10) === _expTblYear);
+
+            // Ringkasan atas tabel
+            let sExp = 0, sWeek = 0, sDone = 0;
+            shown.forEach(r => {
+                if (r.status && r.status !== 'AKTIF') { sDone++; return; }
+                const d = _expDayDiff(r.expDate);
+                if (d < 0) sExp++; else if (d <= 7) sWeek++;
+            });
+            const sum = document.getElementById('exp-table-summary');
+            if (sum) {
+                sum.innerHTML = shown.length
+                    ? `${shown.length} batch \u00b7 <b style="color:var(--red);">${sExp} expired</b> \u00b7 <b style="color:var(--amber);">${sWeek} \u2264 7 hari</b> \u00b7 ${sDone} selesai`
+                    : '';
+            }
+
+            if (!shown.length) {
+                tbody.innerHTML = '<tr><td colspan="7" style="text-align:center; padding:36px; color:var(--text-dim); font-size:0.85rem;">' +
+                    (kw ? 'Tidak ada batch exp yang cocok dengan pencarian.' : 'Belum ada data expired pada periode ini.') + '</td></tr>';
+                return;
+            }
+
+            // Kelompokkan per BULAN TAHUN
+            const byMonth = new Map();
+            shown.forEach(r => {
+                const ym = _expMonthKey(r.expDate);
+                if (!byMonth.has(ym)) byMonth.set(ym, []);
+                byMonth.get(ym).push(r);
+            });
+            const order = _expSortMonthKeys([...byMonth.keys()], thisYear);
+
+            const html = [];
+            order.forEach(ym => {
+                const items = byMonth.get(ym).slice().sort((a, b) => {
+                    const c = (a.expDate || '').localeCompare(b.expDate || '');
+                    return c !== 0 ? c : stripCode(a.namaItem || '').localeCompare(stripCode(b.namaItem || ''), 'id');
+                });
+
+                let mExp = 0, mWeek = 0, mDone = 0;
+                items.forEach(r => {
+                    if (r.status && r.status !== 'AKTIF') { mDone++; return; }
+                    const d = _expDayDiff(r.expDate);
+                    if (d < 0) mExp++; else if (d <= 7) mWeek++;
+                });
+
+                const collapsed = _expCollapsedMonths.has(ym);
+                const isNow     = (ym === nowYm);
+                const meta = [
+                    `<span class="emh-chip">${items.length} batch</span>`,
+                    mExp  ? `<span class="cal-chip cal-chip-expired">${mExp} expired</span>` : '',
+                    mWeek ? `<span class="cal-chip cal-chip-soon">${mWeek} \u2264 7 hari</span>` : '',
+                    mDone ? `<span class="emh-chip">${mDone} selesai</span>` : ''
+                ].join('');
+
+                html.push(
+                    `<tr class="group-hdr"><td colspan="7">` +
+                        `<div class="exp-month-hdr${isNow ? ' is-now' : ''}" onclick="_expToggleMonth('${ym}')" title="Klik untuk melipat / membuka bulan ini">` +
+                            `<span class="emh-title">` +
+                                `<i class="ph ${collapsed ? 'ph-caret-right' : 'ph-caret-down'}"></i>` +
+                                `${_expMonthLabel(ym)}` +
+                                `${isNow ? '<span class="exp-now-tag">bulan ini</span>' : ''}` +
+                            `</span>` +
+                            `<span class="emh-meta">${meta}</span>` +
+                        `</div>` +
+                    `</td></tr>`
+                );
+                if (collapsed) return;
+
+                items.forEach(r => {
+                    const isDone = r.status && r.status !== 'AKTIF';
+                    const diff   = _expDayDiff(r.expDate);
+                    const expBadge = isDone
+                        ? `<span style="color:var(--text-dim); font-size:0.75rem; text-decoration:line-through;">${_fmtDateLabel(r.expDate)}</span>`
+                        : (diff < 0
+                            ? `<span class="cal-chip cal-chip-expired">${_fmtDateLabel(r.expDate)}</span>`
+                            : (diff <= 7
+                                ? `<span class="cal-chip cal-chip-soon">${_fmtDateLabel(r.expDate)}</span>`
+                                : `<span class="cal-chip cal-chip-ok">${_fmtDateLabel(r.expDate)}</span>`));
+                    html.push(
+                        `<tr style="cursor:pointer;" onclick="selectExpDay('${r.expDate}')" title="Klik untuk membuka detail tanggal ini (ubah status barang di panel bawah)">` +
+                            `<td style="font-weight:700; color:var(--text); ${isDone ? 'text-decoration:line-through; opacity:0.55;' : ''}">${stripCode(r.namaItem)}</td>` +
+                            `<td>${expBadge}</td>` +
+                            `<td style="text-align:center;">${_expSisaHariHtml(r, diff)}</td>` +
+                            `<td style="color:var(--text-muted); font-size:0.78rem;">${r.tanggal || '\u2014'}</td>` +
+                            `<td class="mono">${r.noDo || '\u2014'}</td>` +
+                            `<td style="text-align:right; font-weight:700;" class="display-num">${_expQtyCellHtml(r)}</td>` +
+                            `<td style="text-align:center;"><span class="badge ${isDone ? 'badge-sesuai' : 'badge-awal'}">${r.status || 'AKTIF'}</span></td>` +
+                        `</tr>`
+                    );
+                });
+            });
+            tbody.innerHTML = html.join('');
         }
 
         function _fmtDateLabel(dateStr) {
@@ -9541,6 +10010,11 @@ let currentGroup = '', groupId = 0;
         const _DASH_DOW = ['Minggu','Senin','Selasa','Rabu','Kamis','Jumat','Sabtu'];
 
         function _dashGoLowStock() { switchTab('tab-stock'); }
+        /** [UPGRADE] Pintasan dashboard menuju halaman Kartu Stock Detail. */
+        function _dashGoKsDetail() {
+            if (typeof _canAccess === 'function' && !_canAccess('tab-stock')) return _denyAccess('Kartu Stock');
+            openKsDetail();
+        }
         function _dashGoExp()      { switchTab('tab-exp'); }
 
         // [UPGRADE] KPI "SKU Aktif" menunjuk ke MASTER ITEM sebagai source of truth.
@@ -9896,6 +10370,13 @@ let currentGroup = '', groupId = 0;
                 else                        { expTrend.className = 'kpi-trend down'; expTrend.innerHTML = '<i class="ph ph-warning-circle"></i> urgent'; }
             }
 
+            // [UPGRADE] Kartu "Keluar Hari Ini" diganti pintasan KARTU STOCK DETAIL.
+            // Angka utama = jumlah item yang punya kartu stock (bisa ditelusuri
+            // riwayatnya). Aktivitas hari ini tetap terlihat, dipindah ke sub-label.
+            const ksItems = (globalStockData || []).filter(r =>
+                r && r.namaItem && (typeof _isItemAktif !== 'function' || _isItemAktif(r.namaItem)));
+            _setText('dash-kpi-ks', ksItems.length);
+
             const t0 = (typeof getJakartaDate === 'function') ? getJakartaDate() : new Date();
             t0.setHours(0, 0, 0, 0);
             const tStart = t0.getTime(), tEnd = tStart + 86400000;
@@ -9903,9 +10384,10 @@ let currentGroup = '', groupId = 0;
                 const ms = r.rawDate || (r.tanggalEdit ? new Date(r.tanggalEdit).getTime() : 0);
                 return ms >= tStart && ms < tEnd;
             });
-            _setText('dash-kpi-out', outToday.length);
             const outQty = outToday.reduce((s, r) => s + (parseFloat(r.qty) || 0), 0);
-            _setText('dash-kpi-out-sub', F(outQty) + ' unit keluar');
+            _setText('dash-kpi-ks-sub', outToday.length
+                ? (outToday.length + ' transaksi keluar hari ini \u00b7 ' + F(outQty) + ' unit')
+                : 'riwayat masuk & keluar per item');
 
             // ---------- PANEL 1 & 2 ----------
             // Dirender lewat fungsi terpisah supaya klik filter kategori hanya
