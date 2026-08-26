@@ -946,6 +946,24 @@
         /* Dropdown Nama Item (dilekatkan ke body) selalu di atas overlay & tak terpotong */
         .ks-ts-dropdown { z-index:10060 !important; }
 
+        /* [UPGRADE] Chip periode aktif + aksi cepat "semua bulan" pada header tabel. */
+        .ks-period-chip {
+            display:inline-flex; align-items:center; gap:6px;
+            padding:4px 10px; border-radius:99px;
+            background:var(--accent-soft); border:1px solid var(--accent-brd);
+            color:var(--accent); font-size:0.68rem; font-weight:800;
+            letter-spacing:0.04em; white-space:nowrap;
+        }
+        .ks-period-chip.is-all { background:var(--surface2); border-color:var(--border); color:var(--text-muted); }
+        .ks-period-link {
+            background:transparent; border:none; padding:0 0 0 4px; margin:0;
+            color:var(--accent); font-family:inherit; font-size:0.68rem; font-weight:800;
+            text-decoration:underline; cursor:pointer;
+        }
+        .ks-period-link:hover { opacity:0.75; }
+        /* Tombol scan sejajar dropdown item (tinggi mengikuti .inp) */
+        .ks-scan-btn { flex:0 0 auto; padding:0 14px; min-width:48px; }
+
         /* Overlay Laporan Opname — isi tidak berubah, hanya dipindah dari tab ke overlay */
         #laporan-opname-overlay { display:none; position:fixed; inset:0; z-index:9994; background:var(--bg); overflow-y:auto; -webkit-overflow-scrolling:touch; }
         .ks-year-pill {
@@ -1175,10 +1193,25 @@
             .masuk-grid { grid-template-columns: 1fr 1fr; }
         }
 
+        /* [UPGRADE] Modal Form Transaksi Keluar — bottom sheet di mobile,
+           dialog terpusat di desktop (karena tab "Keluar" sudah digabung
+           ke halaman Riwayat Keluar dan form hanya dibuka lewat modal). */
+        @media (min-width: 1024px) {
+            #out-form-modal { align-items:center !important; }
+            #out-form-modal > div {
+                width:min(1180px, 94vw);
+                max-height:92dvh;
+                border-radius:20px !important;
+                box-shadow:0 30px 80px rgba(15,18,34,0.32) !important;
+            }
+        }
+
         /* ===================== BARCODE SCANNER ===================== */        #barcode-modal {
             display:none; position:fixed; inset:0;
             background:var(--overlay-bg); backdrop-filter:blur(10px);
-            z-index:9995; align-items:center; justify-content:center; padding:1rem;
+            /* [UPGRADE] harus di atas overlay Kartu Stock Detail (9995) karena
+               scan kini juga dipanggil dari halaman tersebut. */
+            z-index:10070; align-items:center; justify-content:center; padding:1rem;
         }
         #barcode-modal.show { display:flex; animation:fadeSlide 0.2s ease; }
         #barcode-reader { width:100%; border-radius:14px; overflow:hidden; background:#000; min-height:240px; }
@@ -2428,7 +2461,7 @@
                     </div>
                     <div class="ks-filter-field">
                         <label class="lbl">Bln</label>
-                        <select id="ks-month" class="inp" onchange="_ksRender()">
+                        <select id="ks-month" class="inp" onchange="_ksOnMonthChange()">
                             <option value="ALL">Semua Bulan</option>
                             <option value="0">Januari</option>
                             <option value="1">Februari</option>
@@ -2457,7 +2490,16 @@
                     </div>
                     <div class="ks-filter-field ks-filter-item">
                         <label class="lbl">Nama Item</label>
-                        <select id="ks-item" placeholder="Pilih item..."></select>
+                        <!-- [UPGRADE] Scan barcode langsung dari halaman Kartu Stock Detail:
+                             hasil scan mengganti item terpilih tanpa menutup halaman. -->
+                        <div style="display:flex; gap:8px; align-items:stretch;">
+                            <div style="flex:1; min-width:0;">
+                                <select id="ks-item" placeholder="Pilih item..."></select>
+                            </div>
+                            <button type="button" class="btn-scan ks-scan-btn" onclick="openBarcodeScanner('ks')" title="Scan barcode item">
+                                <i class="ph ph-barcode" style="font-size:1.25rem;"></i> <span class="m-hide">Scan</span>
+                            </button>
+                        </div>
                     </div>
                     <div class="ks-filter-reset">
                         <button onclick="_ksResetFilter()" class="btn-ghost" style="padding:9px 14px; font-size:0.75rem;">
@@ -2471,9 +2513,11 @@
             <div class="card ks-table-card">
                 <div class="card-header">
                     <div style="display:grid; grid-template-columns:1fr auto auto; gap:16px; align-items:center;">
-                        <div class="ks-stat">
+                        <div class="ks-stat" style="min-width:0;">
                             <span class="ks-stat-lbl">Item Terpilih</span>
                             <span id="ks-selected-item" style="font-size:1.05rem; font-weight:800; color:var(--text); overflow:hidden; text-overflow:ellipsis;">—</span>
+                            <!-- [UPGRADE] Penanda periode yang sedang dirender. -->
+                            <span id="ks-period-chip" class="ks-period-chip" style="margin-top:4px; align-self:flex-start;"></span>
                         </div>
                         <div class="ks-stat" style="text-align:right; border-left:1px solid var(--border); padding-left:16px;">
                             <span class="ks-stat-lbl">Total Masuk (IN)</span>
@@ -2909,6 +2953,10 @@
                     <button onclick="resetScanMode()" class="btn-ghost" style="font-size:0.78rem;" title="Coba lagi scan langsung via kamera live">
                         <i class="ph ph-video-camera"></i> Kamera Live
                     </button>
+                    <!-- [UPGRADE] Nada penanda scan berhasil — bisa disenyapkan. -->
+                    <button onclick="toggleScanSound()" id="btn-scan-sound" class="btn-ghost" style="font-size:0.78rem;" title="Nyalakan / senyapkan nada penanda scan">
+                        <i class="ph ph-speaker-high"></i> <span id="scan-sound-txt">Nada: Aktif</span>
+                    </button>
                 </div>
                 <button onclick="closeBarcodeScanner()" class="btn-ghost">Tutup</button>
             </div>
@@ -3038,9 +3086,9 @@
                 <button class="tab-btn active" id="btn-tab-dashboard" onclick="switchTab('tab-dashboard')">
                     <i class="ph ph-squares-four" style="font-size:1.05rem;"></i> Dashboard
                 </button>
-                <button class="tab-btn" id="btn-tab-keluar" onclick="switchTab('tab-keluar')">
-                    <i class="ph ph-upload-simple" style="font-size:1.05rem;"></i> Keluar
-                </button>
+                <!-- [UPGRADE] Tab "Keluar" DIGABUNG ke "Riwayat Keluar".
+                     Form transaksi keluar kini dibuka lewat tombol
+                     "- Tambah Keluar barang" di dalam halaman Riwayat Keluar. -->
                 <button class="tab-btn" id="btn-tab-riwayat-keluar" onclick="switchTab('tab-riwayat-keluar')">
                     <i class="ph ph-clock-counter-clockwise" style="font-size:1.05rem;"></i> Riwayat Keluar
                 </button>
@@ -3272,7 +3320,11 @@
                                 </h2>
                                 <p style="font-size:0.75rem; font-weight: 500; color:var(--text-dim); margin:2px 0 0;">Dikelompokkan per tanggal transaksi</p>
                             </div>
-                            <div style="display:flex; gap:8px; align-items:center;">
+                            <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+                                <!-- [UPGRADE] Pintu masuk form Transaksi Keluar (menggantikan tab "Keluar"). -->
+                                <button onclick="openOutFormModal()" id="btn-add-outbound" class="btn-primary" style="padding:9px 16px; font-size:0.82rem;">
+                                    <i class="ph ph-minus-circle" style="font-size:1.05rem;"></i> Tambah Keluar barang
+                                </button>
                                 <button onclick="printFilteredReport('outbound')" class="btn-ghost" style="color:var(--red); border-color:rgba(220,38,38,0.3); background:var(--red-soft); font-weight:700; padding:9px 12px; font-size:0.8rem;"><i class="ph ph-file-pdf"></i><span class="m-hide"> Print / PDF</span></button>
                                 <button onclick="exportFilteredReportExcel('outbound')" class="btn-ghost" style="color:var(--green); border-color:rgba(22,163,74,0.3); background:var(--green-soft); font-weight:700; padding:9px 12px; font-size:0.8rem;"><i class="ph ph-file-xls"></i><span class="m-hide"> Excel</span></button>
                                 <button onclick="loadOutboundData()" class="btn-ghost" style="font-size:0.78rem;">
@@ -4338,6 +4390,11 @@
             // Injeksi tombol scan barcode ke semua kolom pencarian
             _injectScanButtons();
 
+            // [UPGRADE] Panaskan dekoder barcode native & selaraskan tombol nada
+            // supaya scan pertama tidak menunggu inisialisasi API.
+            _nativeScanWarmup();
+            _syncScanSoundBtn();
+
             // Pulihkan status lipat grup filter Stock Opname
             _initFacetGroups();
 
@@ -4450,6 +4507,9 @@
             document.querySelectorAll('.mnav-btn[data-tab]').forEach(b =>
                 b.classList.toggle('active', b.getAttribute('data-tab') === tabId));
             closeMoreSheet();
+            // [UPGRADE] Form Keluar hidup di dalam modal; kembalikan ke tempat asalnya
+            // saat user berpindah halaman supaya tidak menutupi konten tab baru.
+            closeOutFormModal();
 
             if (tabId === 'tab-dashboard') {
                 renderDashboard();
@@ -4504,6 +4564,9 @@
         let _outFormHome = null;
 
         function openOutFormModal() {
+            // [UPGRADE] Satu-satunya pintu masuk form Transaksi Keluar setelah tab
+            // "Keluar" digabung ke Riwayat Keluar → gerbang role dicek di sini.
+            if (currentUser && !_canAccess('tab-keluar')) return _denyAccess('Transaksi Keluar');
             const grid = document.getElementById('keluar-grid');
             if (!grid) return;
             if (!_outFormHome) _outFormHome = grid.parentElement;
@@ -4816,6 +4879,10 @@
                             }
                             Swal.fire({ title: 'Tersimpan!', html: spbText, icon: 'success', background: 'var(--surface)', color: 'var(--text)', confirmButtonColor: 'var(--accent)' });
                             cartItems = []; renderCart();
+                            // [UPGRADE] Form Keluar kini hanya hidup di dalam modal →
+                            // tutup setelah simpan agar Riwayat Keluar yang sudah
+                            // diperbarui langsung terlihat.
+                            closeOutFormModal();
                             // BOOSTER: tempel baris tersimpan ke data lokal — tanpa refetch penuh
                             if (res.saved && res.saved.length && globalOutboundData.length) {
                                 globalOutboundData = res.saved.concat(globalOutboundData);
@@ -5046,6 +5113,7 @@ let currentGroup = '', groupId = 0;
                                 row.qty          = parseFloat(v.qty) || 0;
                                 row.altUom       = v.altUom;
                                 row.expDate      = v.expDate;
+                                _ksInvalidateIndex();   // kartu stock ikut menyegarkan index
                                 applyFilterInbound();
                             } else {
                                 globalInboundData = [];
@@ -5493,6 +5561,7 @@ let currentGroup = '', groupId = 0;
                                 row.tanggal      = _fmtDMY(d);
                                 row.tanggalGroup = _fmtGroupDate(d);
                                 row.qty          = parseFloat(v.qty) || 0;
+                                _ksInvalidateIndex();   // kartu stock ikut menyegarkan index
                                 applyFilterOutbound();
                             } else {
                                 loadOutboundData();
@@ -5875,11 +5944,39 @@ let currentGroup = '', groupId = 0;
         // Index per-item dibangun sekali saat overlay dibuka (O(n)); render tiap
         // pilih item / ganti filter hanya O(k) → skalabel untuk ribuan baris.
         // ============================================================
-        const _ksState = { year: null, item: null, sortAsc: true };
+        const _ksState = { year: null, month: null, item: null, sortAsc: true };
         let _ksItemTom = null;    // instance TomSelect dropdown item
         let _ksPendingItem = null; // item yang diminta dari luar (mis. hasil scan barcode)
         let _ksIndex   = null;    // Map: namaItem -> [pergerakan...] (urut ASC)
+        let _ksIndexSrc = null;   // sidik sumber index → dipakai ulang bila data tak berubah
         let _ksRows    = [];      // baris terfilter aktif (urut ASC) untuk export
+        let _ksRenderToken = 0;   // pembatal render bertahap yang masih berjalan
+        const KS_CHUNK = 120;     // jumlah baris per potongan render
+
+        /**
+         * [UPGRADE] Periode berjalan (bulan & tahun sekarang, zona Jakarta).
+         * Dipakai sebagai periode default halaman Kartu Stock Detail supaya
+         * yang dirender pertama hanya pergerakan bulan berjalan — jauh lebih
+         * ringan. Kalkulasi saldo TIDAK terpengaruh: saldo berjalan tetap
+         * dihitung kronologis dari SELURUH pergerakan, filter hanya membatasi
+         * baris yang ditampilkan.
+         */
+        function _ksCurrentPeriod() {
+            const d = (typeof getJakartaDate === 'function') ? getJakartaDate() : new Date();
+            return { year: d.getFullYear(), month: d.getMonth() };
+        }
+
+        /** Set filter ke periode berjalan + sinkronkan dropdown bulan. */
+        function _ksApplyRunningPeriod() {
+            const cur = _ksCurrentPeriod();
+            _ksState.year  = cur.year;
+            _ksState.month = String(cur.month);
+            const sel = document.getElementById('ks-month');
+            if (sel) sel.value = _ksState.month;
+        }
+
+        /** Paksa index pergerakan dibangun ulang (dipanggil saat data IN/OUT diubah di tempat). */
+        function _ksInvalidateIndex() { _ksIndex = null; _ksIndexSrc = null; }
 
         function openKsDetail() {
             const ov = document.getElementById('ks-detail-overlay');
@@ -5887,6 +5984,10 @@ let currentGroup = '', groupId = 0;
             ov.setAttribute('aria-hidden', 'false');
             document.body.style.overflow = 'hidden';           // kunci scroll latar
             document.addEventListener('keydown', _ksOnKeydown);
+            // [UPGRADE] Prioritas render: selalu mulai dari BULAN BERJALAN.
+            // Baris yang harus dicetak ke DOM menyusut drastis (1 bulan, bukan
+            // seluruh tahun) sehingga halaman terbuka jauh lebih ringan.
+            _ksApplyRunningPeriod();
             _ksUpdateSortIcon();
             _ksSetLoading();
             // Pastikan data IN & OUT tersedia (IN tidak dimuat saat bootstrap).
@@ -5951,7 +6052,15 @@ let currentGroup = '', groupId = 0;
         }
 
         // Bangun index pergerakan per item (IN dari Data Masuk, OUT dari Riwayat Keluar).
+        // [UPGRADE] Hasilnya dipakai ulang selama array sumber belum diganti/berubah
+        // panjang → buka-tutup halaman berikutnya tidak membangun ulang index.
         function _ksBuildIndex() {
+            const inArr  = globalInboundData  || [];
+            const outArr = globalOutboundData || [];
+            if (_ksIndex && _ksIndexSrc
+                && _ksIndexSrc.inRef  === inArr  && _ksIndexSrc.inLen  === inArr.length
+                && _ksIndexSrc.outRef === outArr && _ksIndexSrc.outLen === outArr.length) return;
+            _ksIndexSrc = { inRef: inArr, inLen: inArr.length, outRef: outArr, outLen: outArr.length };
             _ksIndex = new Map();
             const push = (name, mv) => {
                 let arr = _ksIndex.get(name);
@@ -6065,10 +6174,104 @@ let currentGroup = '', groupId = 0;
 
         function _ksOnKategoriChange() { _ksBuildItemSelect(); _ksRender(); }
 
+        /** Dropdown BLN diubah manual → simpan ke state lalu render ulang. */
+        function _ksOnMonthChange() {
+            const sel = document.getElementById('ks-month');
+            _ksState.month = sel ? sel.value : 'ALL';
+            _ksRender();
+        }
+
+        /** Tampilkan seluruh bulan pada tahun aktif (render lebih berat, dipilih sadar). */
+        function _ksShowAllMonths() {
+            _ksState.month = 'ALL';
+            const sel = document.getElementById('ks-month');
+            if (sel) sel.value = 'ALL';
+            _ksRender();
+        }
+
+        /** Kembali ke periode berjalan (default ringan). */
+        function _ksGotoCurrentPeriod() {
+            _ksApplyRunningPeriod();
+            _ksBuildYears();
+            _ksRender();
+        }
+
+        /** Lompat ke periode pergerakan TERAKHIR item terpilih. */
+        function _ksGotoLastMovement() {
+            const moves = (_ksIndex && _ksState.item) ? (_ksIndex.get(_ksState.item) || []) : [];
+            let last = null;
+            for (let i = moves.length - 1; i >= 0; i--) { if (moves[i].rawDate) { last = moves[i]; break; } }
+            if (!last) return;
+            const d = new Date(last.rawDate);
+            _ksState.year  = d.getFullYear();
+            _ksState.month = String(d.getMonth());
+            const sel = document.getElementById('ks-month');
+            if (sel) sel.value = _ksState.month;
+            _ksBuildYears();
+            _ksRender();
+        }
+
+        /**
+         * [UPGRADE] Pilih item dari luar dropdown (dipakai hasil scan barcode di
+         * halaman ini). Bila item tersaring kategori, kategori direset ke "Semua"
+         * lebih dulu supaya item hasil scan pasti bisa dipilih.
+         */
+        function _ksSelectItem(namaItem) {
+            if (!namaItem) return false;
+            if (_ksItemTom) {
+                if (!_ksItemTom.options[namaItem]) {
+                    const kat = document.getElementById('ks-kategori');
+                    if (kat) kat.value = 'ALL';
+                    _ksPendingItem = namaItem;
+                    _ksBuildItemSelect();
+                    _ksRender();
+                    return true;
+                }
+                _ksState.item = namaItem;
+                _ksItemTom.setValue(namaItem, true); // silent → hindari render ganda
+            } else {
+                const el = document.getElementById('ks-item');
+                if (el && !Array.prototype.some.call(el.options, o => o.value === namaItem)) {
+                    const kat = document.getElementById('ks-kategori');
+                    if (kat) kat.value = 'ALL';
+                    _ksPendingItem = namaItem;
+                    _ksBuildItemSelect();
+                    _ksRender();
+                    return true;
+                }
+                _ksState.item = namaItem;
+                if (el) el.value = namaItem;
+            }
+            _ksRender();
+            return true;
+        }
+
+        /** Sinkronkan dropdown bulan + chip penanda periode yang sedang dirender. */
+        function _ksSyncPeriodUI() {
+            const sel = document.getElementById('ks-month');
+            if (sel && sel.value !== String(_ksState.month)) sel.value = String(_ksState.month);
+            const chip = document.getElementById('ks-period-chip');
+            if (!chip) return;
+            const isAll = (_ksState.month === 'ALL' || _ksState.month == null);
+            chip.className = 'ks-period-chip' + (isAll ? ' is-all' : '');
+            if (isAll) {
+                chip.innerHTML = '<i class="ph ph-stack"></i> Semua bulan · ' + _ksState.year +
+                    '<button type="button" class="ks-period-link" onclick="_ksGotoCurrentPeriod()">bulan berjalan</button>';
+            } else {
+                const cur   = _ksCurrentPeriod();
+                const isNow = (_ksState.year === cur.year && String(cur.month) === String(_ksState.month));
+                const label = MONTHS_ID[parseInt(_ksState.month, 10)] || '';
+                chip.innerHTML = '<i class="ph ph-lightning"></i> ' + label + ' ' + _ksState.year +
+                    (isNow ? ' · bulan berjalan' : '') +
+                    '<button type="button" class="ks-period-link" onclick="_ksShowAllMonths()">semua bulan</button>';
+            }
+        }
+
         function _ksResetFilter() {
-            document.getElementById('ks-month').value    = 'ALL';
             document.getElementById('ks-kategori').value = 'ALL';
-            _ksState.year    = getJakartaDate().getFullYear();
+            // [UPGRADE] Default kembali ke periode berjalan (bukan "Semua Bulan")
+            // agar reset filter tetap menghasilkan render yang ringan.
+            _ksApplyRunningPeriod();
             _ksState.item    = null;
             _ksState.sortAsc = true;
             _ksUpdateSortIcon();
@@ -6084,9 +6287,13 @@ let currentGroup = '', groupId = 0;
         }
 
         // Render inti: hitung saldo berjalan (dari Stock Awal), filter periode, tampilkan.
+        // [UPGRADE] Saldo berjalan TETAP dihitung dari SELURUH pergerakan kronologis
+        // (carry-forward utuh); yang dipangkas hanya jumlah baris yang dicetak ke DOM.
         function _ksRender() {
             const tbody  = document.getElementById('ks-tbody');
             if (!tbody) return;
+            _ksRenderToken++;                 // hentikan render bertahap yang masih jalan
+            _ksSyncPeriodUI();
             const nameEl = document.getElementById('ks-selected-item');
             const inEl   = document.getElementById('ks-total-in');
             const outEl  = document.getElementById('ks-total-out');
@@ -6121,9 +6328,9 @@ let currentGroup = '', groupId = 0;
                 return { m, sisa: running };
             });
 
-            // Filter periode (THN + BLN)
+            // Filter periode (THN + BLN) — default periode berjalan
             const y  = _ksState.year;
-            const mo = document.getElementById('ks-month').value;
+            const mo = (_ksState.month == null) ? 'ALL' : _ksState.month;
             const disp = withBal.filter(rec => {
                 if (!rec.m.rawDate) return false;
                 const d = new Date(rec.m.rawDate);
@@ -6145,25 +6352,54 @@ let currentGroup = '', groupId = 0;
             _ksRows = disp.map(rec => Object.assign({}, rec.m, { sisa: rec.sisa, uomShown: rec.m.uom || baseUom || '' }));
 
             if (!disp.length) {
-                tbody.innerHTML = '<tr><td colspan="8" style="text-align:center; padding:40px; color:var(--text-dim); font-size:0.85rem;">Tidak ada pergerakan stok pada periode ini.</td></tr>';
+                tbody.innerHTML = _ksEmptyStateHtml(withBal, mo);
                 return;
             }
 
             // Arah tampilan (default TGL↑ ASC)
             const view = _ksState.sortAsc ? disp : disp.slice().reverse();
-            const frag = document.createDocumentFragment();
-            view.forEach(rec => {
-                const m      = rec.m;
-                const isAwal = m.jenis === 'AWAL';
-                const isIn   = m.jenis === 'IN';
-                const hasExp = (isIn || isAwal) && m.expDate;
-                const expVal = hasExp ? formatExpDate(m.expDate) : '—';
-                const expSt  = hasExp ? getExpDateStyle(m.expDate) : '';
-                const masukCol = isAwal 
-                    ? `<span style="color:var(--amber); font-weight:700;" title="Stock Awal (Migrasi)">+${formatID(m.qty)}</span>`
-                    : (isIn ? `+${formatID(m.qty)}` : '');
-                const tr = document.createElement('tr');
-                tr.innerHTML = `
+            _ksPaintRows(view, baseUom);
+        }
+
+        /**
+         * [UPGRADE] Empty state periode: karena halaman kini dibuka pada bulan
+         * berjalan, item tanpa pergerakan bulan ini diberi jalan pintas ke
+         * "semua bulan" atau ke periode pergerakan terakhirnya.
+         */
+        function _ksEmptyStateHtml(withBal, mo) {
+            const cell = txt => '<tr><td colspan="8" style="text-align:center; padding:40px; color:var(--text-dim); font-size:0.85rem;">' + txt + '</td></tr>';
+            if (!withBal.length) return cell('Belum ada pergerakan stok untuk item ini.');
+
+            let last = null;
+            for (let i = withBal.length - 1; i >= 0; i--) { if (withBal[i].m.rawDate) { last = withBal[i].m; break; } }
+            const periodTxt = (mo === 'ALL')
+                ? ('tahun <b>' + _ksState.year + '</b>')
+                : ('<b>' + (MONTHS_ID[parseInt(mo, 10)] || '') + ' ' + _ksState.year + '</b>');
+            let html = 'Tidak ada pergerakan stok pada ' + periodTxt + '.';
+            const act = [];
+            if (mo !== 'ALL') act.push('<button type="button" class="ks-period-link" style="font-size:0.8rem;" onclick="_ksShowAllMonths()">Tampilkan semua bulan ' + _ksState.year + '</button>');
+            if (last) {
+                const d  = new Date(last.rawDate);
+                const dp = (d.getFullYear() !== _ksState.year) || (String(d.getMonth()) !== String(mo));
+                if (dp) act.push('<button type="button" class="ks-period-link" style="font-size:0.8rem;" onclick="_ksGotoLastMovement()">Buka periode terakhir (' + (last.tanggal || (MONTHS_ID[d.getMonth()] + ' ' + d.getFullYear())) + ')</button>');
+            }
+            if (act.length) html += '<div style="margin-top:10px; display:flex; gap:16px; justify-content:center; flex-wrap:wrap;">' + act.join('') + '</div>';
+            return cell(html);
+        }
+
+        /** Bangun satu baris tabel kartu stock (markup identik dengan sebelumnya). */
+        function _ksBuildRow(rec, baseUom) {
+            const m      = rec.m;
+            const isAwal = m.jenis === 'AWAL';
+            const isIn   = m.jenis === 'IN';
+            const hasExp = (isIn || isAwal) && m.expDate;
+            const expVal = hasExp ? formatExpDate(m.expDate) : '—';
+            const expSt  = hasExp ? getExpDateStyle(m.expDate) : '';
+            const masukCol = isAwal
+                ? `<span style="color:var(--amber); font-weight:700;" title="Stock Awal (Migrasi)">+${formatID(m.qty)}</span>`
+                : (isIn ? `+${formatID(m.qty)}` : '');
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
                     <td style="color:var(--text-muted); font-weight:600; font-size:0.8rem; white-space:nowrap;">${m.tanggal || '—'}</td>
                     <td class="mono">${(m.noDo && m.noDo.toString().trim()) ? m.noDo : '—'}</td>
                     <td><span style="${expSt}">${expVal}</span></td>
@@ -6172,16 +6408,39 @@ let currentGroup = '', groupId = 0;
                     <td style="text-align:center;" class="${rec.sisa < 0 ? 'sisa-neg' : 'sisa-pos'}">${formatID(rec.sisa)}</td>
                     <td style="color:var(--text-muted); font-size:0.8rem;">${m.uom || baseUom || '—'}</td>
                     <td style="color:var(--text-dim); font-size:0.8rem;">${(isIn || isAwal) ? (m.altUom || '—') : '—'}</td>`;
-                frag.appendChild(tr);
-            });
+            return tr;
+        }
+
+        /**
+         * [UPGRADE] Render bertahap: potongan pertama tampil seketika, sisanya
+         * menyusul per frame. Periode berjalan biasanya selesai dalam 1 potongan;
+         * pilihan "Semua Bulan" pun tetap mulus karena thread tidak diblokir.
+         * Token render memastikan potongan dari filter lama otomatis batal.
+         */
+        function _ksPaintRows(view, baseUom) {
+            const tbody = document.getElementById('ks-tbody');
+            if (!tbody) return;
+            const token = _ksRenderToken;
             tbody.innerHTML = '';
-            tbody.appendChild(frag);
+            let i = 0;
+            const step = () => {
+                if (token !== _ksRenderToken) return;   // filter sudah berubah → batal
+                const frag = document.createDocumentFragment();
+                const end  = Math.min(i + KS_CHUNK, view.length);
+                for (; i < end; i++) frag.appendChild(_ksBuildRow(view[i], baseUom));
+                tbody.appendChild(frag);
+                if (i < view.length) {
+                    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(step);
+                    else setTimeout(step, 0);
+                }
+            };
+            step();
         }
 
         // ---- Export (PDF via print & Excel via HTML .xls) ----
         function _ksBuildExportHtml() {
             const item       = _ksState.item ? stripCode(_ksState.item) : '—';
-            const mo         = document.getElementById('ks-month').value;
+            const mo         = (_ksState.month == null) ? 'ALL' : _ksState.month;
             const monthLabel = (mo === 'ALL') ? 'Semua Bulan' : MONTHS_ID[parseInt(mo, 10)];
             let tin = 0, tout = 0;
             _ksRows.forEach(r => {
@@ -8214,6 +8473,199 @@ let currentGroup = '', groupId = 0;
         let _scanTarget = null;
         let _scanLock   = false;
         let _scanLive   = false; // apakah live camera scan sedang berjalan
+        let _scanEngine = null;  // 'native' | 'html5' — mesin live yang sedang dipakai
+
+        // ---------------------------------------------------------------
+        // [UPGRADE] NADA PENANDA SCAN — dibangkitkan Web Audio (tanpa file
+        // eksternal, tetap bunyi walau koneksi lambat). Sukses = dua nada
+        // pendek menaik khas scanner kasir; gagal = satu nada rendah.
+        // ---------------------------------------------------------------
+        let _scanAudioCtx = null;
+
+        function _scanSoundOn() { return safeStore.get('SCAN_SOUND') !== 'off'; }
+
+        /** Siapkan/lanjutkan AudioContext — wajib dipanggil dari gesture user. */
+        function _scanAudioUnlock() {
+            try {
+                const AC = window.AudioContext || window.webkitAudioContext;
+                if (!AC) return;
+                if (!_scanAudioCtx) _scanAudioCtx = new AC();
+                if (_scanAudioCtx.state === 'suspended') _scanAudioCtx.resume();
+            } catch (e) {}
+        }
+
+        function _scanBeep(ok) {
+            if (!_scanSoundOn()) return;
+            try {
+                const AC = window.AudioContext || window.webkitAudioContext;
+                if (!AC) return;
+                if (!_scanAudioCtx) _scanAudioCtx = new AC();
+                if (_scanAudioCtx.state === 'suspended') _scanAudioCtx.resume();
+                const ctx = _scanAudioCtx;
+                const t0  = ctx.currentTime;
+                const notes = ok ? [[1180, 0, 0.075], [1620, 0.075, 0.11]] : [[320, 0, 0.20]];
+                notes.forEach(n => {
+                    const freq = n[0], at = n[1], dur = n[2];
+                    const osc  = ctx.createOscillator();
+                    const gain = ctx.createGain();
+                    osc.type = 'square';
+                    osc.frequency.setValueAtTime(freq, t0 + at);
+                    gain.gain.setValueAtTime(0.0001, t0 + at);
+                    gain.gain.exponentialRampToValueAtTime(0.22, t0 + at + 0.012);
+                    gain.gain.exponentialRampToValueAtTime(0.0001, t0 + at + dur);
+                    osc.connect(gain); gain.connect(ctx.destination);
+                    osc.start(t0 + at); osc.stop(t0 + at + dur + 0.02);
+                });
+            } catch (e) {}
+        }
+
+        function toggleScanSound() {
+            const on = _scanSoundOn();
+            if (on) safeStore.set('SCAN_SOUND', 'off');
+            else    { safeStore.remove('SCAN_SOUND'); _scanAudioUnlock(); _scanBeep(true); }
+            _syncScanSoundBtn();
+        }
+
+        function _syncScanSoundBtn() {
+            const btn = document.getElementById('btn-scan-sound');
+            const txt = document.getElementById('scan-sound-txt');
+            const on  = _scanSoundOn();
+            if (txt) txt.textContent = on ? 'Nada: Aktif' : 'Nada: Senyap';
+            if (btn) {
+                const ic = btn.querySelector('i');
+                if (ic) ic.className = on ? 'ph ph-speaker-high' : 'ph ph-speaker-slash';
+                btn.style.color = on ? 'var(--accent)' : '';
+            }
+        }
+
+        // ---------------------------------------------------------------
+        // [UPGRADE] JALUR CEPAT: BarcodeDetector BAWAAN browser dibaca langsung
+        // dari stream kamera. Dekode dilakukan mesin native (bukan JavaScript),
+        // dijalankan tiap frame — jauh lebih cepat & tahan blur dibanding
+        // pemindaian JS ber-fps tetap. html5-qrcode tetap dipakai sebagai
+        // cadangan bila API ini tidak tersedia.
+        //
+        // Algoritma pencocokan item (_findItemByBarcode / _findItemByName)
+        // TIDAK disentuh — mesin ini hanya mengganti cara kode dibaca.
+        // ---------------------------------------------------------------
+        const _nativeScan = { formats: null, detector: null, stream: null, video: null, timer: 0, running: false, failed: false };
+
+        function _nativeScanSupported() {
+            return (typeof BarcodeDetector !== 'undefined') &&
+                   !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+        }
+
+        /** Format barcode yang relevan untuk label item (di-cache sekali). */
+        function _nativeScanFormats() {
+            if (_nativeScan.formats) return Promise.resolve(_nativeScan.formats);
+            return BarcodeDetector.getSupportedFormats().then(all => {
+                const want = ['code_128','code_39','code_93','codabar','ean_13','ean_8',
+                              'itf','upc_a','upc_e','data_matrix','qr_code','pdf417','aztec'];
+                const use  = (all || []).filter(f => want.indexOf(f) !== -1);
+                _nativeScan.formats = use.length ? use : (all || []);
+                return _nativeScan.formats;
+            });
+        }
+
+        /** Pemanasan saat aplikasi idle → scan pertama tidak menunggu init API. */
+        function _nativeScanWarmup() {
+            if (!_nativeScanSupported()) return;
+            try { _nativeScanFormats().catch(() => {}); } catch (e) {}
+        }
+
+        function _nativeScanStart(onCode) {
+            return new Promise((resolve, reject) => {
+                if (!_nativeScanSupported()) return reject(new Error('BarcodeDetector tidak tersedia'));
+                _nativeScanFormats().then(formats => {
+                    if (!formats || !formats.length) throw new Error('Format barcode tidak didukung');
+                    _nativeScan.detector = new BarcodeDetector({ formats: formats });
+                    return navigator.mediaDevices.getUserMedia({
+                        audio: false,
+                        video: {
+                            facingMode: { ideal: 'environment' },
+                            width:      { ideal: 1280 },
+                            height:     { ideal: 720 },
+                            frameRate:  { ideal: 30 }
+                        }
+                    });
+                }).then(stream => {
+                    _nativeScan.stream = stream;
+                    // Autofokus kontinu bila kamera mendukung → barcode kecil cepat tajam.
+                    try {
+                        const track = stream.getVideoTracks()[0];
+                        const caps  = track.getCapabilities ? track.getCapabilities() : {};
+                        const adv   = [];
+                        if (caps.focusMode && caps.focusMode.indexOf('continuous') !== -1) adv.push({ focusMode: 'continuous' });
+                        if (adv.length) track.applyConstraints({ advanced: adv }).catch(() => {});
+                    } catch (e) {}
+
+                    const host = document.getElementById('barcode-reader');
+                    const v = document.createElement('video');
+                    v.setAttribute('playsinline', 'true');
+                    v.muted = true; v.autoplay = true;
+                    v.style.cssText = 'width:100%; display:block; border-radius:14px; background:#000;';
+                    host.appendChild(v);
+                    _nativeScan.video = v;
+                    v.srcObject = stream;
+                    return v.play().catch(() => {});
+                }).then(() => {
+                    _nativeScan.running = true;
+                    _nativeScanLoop(onCode);
+                    resolve(true);
+                }).catch(err => { _nativeScanStop(); reject(err); });
+            });
+        }
+
+        function _nativeScanLoop(onCode) {
+            const next = () => {
+                if (!_nativeScan.running) return;
+                _nativeScan.timer = (typeof requestAnimationFrame === 'function')
+                    ? requestAnimationFrame(tick) : setTimeout(tick, 33);
+            };
+            const tick = () => {
+                if (!_nativeScan.running) return;
+                const v = _nativeScan.video;
+                if (!v || v.readyState < 2) return next();
+                _nativeScan.detector.detect(v)
+                    .then(codes => {
+                        if (!_nativeScan.running) return;
+                        let hit = null;
+                        (codes || []).forEach(c => { if (!hit && c && c.rawValue && c.rawValue.trim()) hit = c.rawValue.trim(); });
+                        if (hit) { _nativeScan.running = false; onCode(hit); return; }
+                        next();
+                    })
+                    .catch(() => next());
+            };
+            tick();
+        }
+
+        function _nativeScanStop() {
+            _nativeScan.running = false;
+            if (_nativeScan.timer) {
+                try { cancelAnimationFrame(_nativeScan.timer); } catch (e) {}
+                try { clearTimeout(_nativeScan.timer); } catch (e) {}
+                _nativeScan.timer = 0;
+            }
+            try {
+                if (_nativeScan.video) {
+                    _nativeScan.video.pause();
+                    _nativeScan.video.srcObject = null;
+                    if (_nativeScan.video.parentNode) _nativeScan.video.parentNode.removeChild(_nativeScan.video);
+                }
+            } catch (e) {}
+            try { if (_nativeScan.stream) _nativeScan.stream.getTracks().forEach(t => t.stop()); } catch (e) {}
+            _nativeScan.stream = null;
+            _nativeScan.video  = null;
+        }
+
+        /** Hentikan seluruh mesin live (native / html5-qrcode). Selalu resolve. */
+        function _scanStopLive() {
+            _nativeScanStop();
+            const p = (_html5Qr && _scanEngine === 'html5') ? _html5Qr.stop().catch(() => {}) : Promise.resolve();
+            _scanLive   = false;
+            _scanEngine = null;
+            return p;
+        }
 
         // Peta: id input pencarian → fungsi render filternya
         const SEARCH_FILTER_MAP = {
@@ -8241,7 +8693,11 @@ let currentGroup = '', groupId = 0;
             }
         }
 
-        /** Umpan balik singkat setelah scan (sukses / tidak dikenali). */
+        /**
+         * Umpan balik singkat setelah scan (sukses / tidak dikenali).
+         * Nada penanda TIDAK dibunyikan di sini — _onBarcodeScanned() sudah
+         * membunyikannya lebih dulu, tepat saat kode terbaca, agar terasa instan.
+         */
         function _scanFeedback(ok, msg) {
             if (typeof hapticFeedback === 'function') hapticFeedback(ok ? 'success' : 'warning');
             if (!window.Swal) return;
@@ -8269,11 +8725,13 @@ let currentGroup = '', groupId = 0;
         }
 
         function openBarcodeScanner(mode, inputId) {
-            if (typeof Html5Qrcode === 'undefined') {
+            if (typeof Html5Qrcode === 'undefined' && !_nativeScanSupported()) {
                 return showAlert('Tidak Didukung', 'Library scanner belum termuat. Periksa koneksi internet.', 'error');
             }
             _scanTarget = { mode, inputId };
             _scanLock   = false;
+            _scanAudioUnlock();          // klik tombol Scan = gesture user → izin audio
+            _syncScanSoundBtn();
             const statusEl = document.getElementById('barcode-status');
             statusEl.textContent = 'Membuka kamera...';
             statusEl.style.color = '';
@@ -8289,47 +8747,72 @@ let currentGroup = '', groupId = 0;
                 return;
             }
 
+            // ★ JALUR CEPAT: dekoder native langsung di atas stream kamera.
+            // Bila pernah gagal di perangkat ini, langsung pakai mesin cadangan
+            // supaya tidak ada jeda percobaan berulang tiap kali scan dibuka.
+            if (_nativeScanSupported() && !_nativeScan.failed) {
+                _nativeScanStart(code => _onBarcodeScanned(code))
+                    .then(() => {
+                        _scanLive   = true;
+                        _scanEngine = 'native';
+                        statusEl.textContent = 'Arahkan kamera ke barcode / QR code item...';
+                    })
+                    .catch(err => { _nativeScan.failed = true; _startScannerFallback(statusEl, err); });
+                return;
+            }
+            _startScannerFallback(statusEl, null);
+        }
+
+        /** Cadangan: mesin html5-qrcode (dipakai bila dekoder native tak tersedia/gagal). */
+        function _startScannerFallback(statusEl, preErr) {
+            if (typeof Html5Qrcode === 'undefined') return _scanCameraError(statusEl, preErr);
             if (!_html5Qr) _html5Qr = new Html5Qrcode('barcode-reader');
 
             _html5Qr.start(
                 { facingMode: 'environment' },
-                { fps: 10, qrbox: { width: 280, height: 170 }, useBarCodeDetectorIfSupported: true },
+                { fps: 15, qrbox: { width: 300, height: 190 }, useBarCodeDetectorIfSupported: true },
                 (decodedText) => { _onBarcodeScanned(decodedText); },
                 () => {} // frame tanpa barcode — abaikan
             ).then(() => {
-                _scanLive = true;
+                _scanLive   = true;
+                _scanEngine = 'html5';
                 statusEl.textContent = 'Arahkan kamera ke barcode / QR code item...';
-            }).catch(err => {
-                _scanLive = false;
-                const msg = (err && err.message ? err.message : err || '').toString();
-                let hint;
-                if (msg.indexOf('NotAllowedError') > -1 || msg.indexOf('Permission') > -1) {
-                    // ★ Ingat bahwa kamera live diblokir → scan berikutnya otomatis pakai mode foto
-                    safeStore.set('BARCODE_SCAN_MODE', 'photo');
-                    hint = 'Kamera live diblokir browser. Membuka kamera foto otomatis... ' +
-                           'Mulai sekarang tombol Scan langsung membuka kamera foto. ' +
-                           '(Ketuk "Kamera Live" jika ingin mencoba scan langsung lagi.)';
-                    // Coba langsung buka kamera bawaan tanpa menunggu klik
-                    setTimeout(() => { try { document.getElementById('barcode-file-input').click(); } catch (e) {} }, 400);
-                } else if (msg.indexOf('NotFoundError') > -1) {
-                    hint = 'Kamera tidak terdeteksi di perangkat ini. Gunakan tombol "Ambil Foto Barcode" di bawah.';
-                } else if (msg.indexOf('NotReadableError') > -1) {
-                    hint = 'Kamera sedang dipakai aplikasi lain. Tutup aplikasi tersebut, atau gunakan tombol "Ambil Foto Barcode".';
-                } else {
-                    hint = 'Gagal membuka kamera: ' + msg + '. Gunakan tombol "Ambil Foto Barcode" di bawah sebagai alternatif.';
-                }
-                statusEl.textContent = hint;
-                statusEl.style.color = '';
-                _scanState('error');
-            });
+            }).catch(err => _scanCameraError(statusEl, err));
+        }
+
+        /** Pemetaan pesan kegagalan kamera (perilaku & teks tidak berubah). */
+        function _scanCameraError(statusEl, err) {
+            _scanLive   = false;
+            _scanEngine = null;
+            const msg = (err && err.message ? err.message : err || '').toString();
+            const denied = (err && err.name === 'NotAllowedError') ||
+                           msg.indexOf('NotAllowedError') > -1 || msg.indexOf('Permission') > -1;
+            const notFound = (err && err.name === 'NotFoundError') || msg.indexOf('NotFoundError') > -1;
+            const busy = (err && err.name === 'NotReadableError') || msg.indexOf('NotReadableError') > -1;
+            let hint;
+            if (denied) {
+                // ★ Ingat bahwa kamera live diblokir → scan berikutnya otomatis pakai mode foto
+                safeStore.set('BARCODE_SCAN_MODE', 'photo');
+                hint = 'Kamera live diblokir browser. Membuka kamera foto otomatis... ' +
+                       'Mulai sekarang tombol Scan langsung membuka kamera foto. ' +
+                       '(Ketuk "Kamera Live" jika ingin mencoba scan langsung lagi.)';
+                // Coba langsung buka kamera bawaan tanpa menunggu klik
+                setTimeout(() => { try { document.getElementById('barcode-file-input').click(); } catch (e) {} }, 400);
+            } else if (notFound) {
+                hint = 'Kamera tidak terdeteksi di perangkat ini. Gunakan tombol "Ambil Foto Barcode" di bawah.';
+            } else if (busy) {
+                hint = 'Kamera sedang dipakai aplikasi lain. Tutup aplikasi tersebut, atau gunakan tombol "Ambil Foto Barcode".';
+            } else {
+                hint = 'Gagal membuka kamera: ' + msg + '. Gunakan tombol "Ambil Foto Barcode" di bawah sebagai alternatif.';
+            }
+            statusEl.textContent = hint;
+            statusEl.style.color = '';
+            _scanState('error');
         }
 
         function closeBarcodeScanner() {
             document.getElementById('barcode-modal').classList.remove('show');
-            if (_html5Qr && _scanLive) {
-                _html5Qr.stop().catch(() => {});
-            }
-            _scanLive = false;
+            _scanStopLive();
         }
 
         // Hardware scanner listener (USB/Bluetooth Scanner)
@@ -8344,8 +8827,16 @@ let currentGroup = '', groupId = 0;
                     // Check context. If neither keluar nor masuk is active, default to global search
                     let mode = 'search';
                     let inputId = 'filter-master-name';
-                    if (document.getElementById('tab-keluar').classList.contains('active')) {
+                    // [UPGRADE] Form Keluar kini hidup di dalam modal (tab "Keluar"
+                    // sudah digabung ke Riwayat Keluar) → konteksnya dibaca dari
+                    // modal yang terbuka, bukan dari tab yang aktif.
+                    const outModal = document.getElementById('out-form-modal');
+                    const ksOv     = document.getElementById('ks-detail-overlay');
+                    if (outModal && outModal.style.display === 'flex') {
                         mode = 'keluar';
+                    } else if (ksOv && ksOv.style.display === 'flex') {
+                        // Halaman Kartu Stock Detail terbuka → langsung ganti item.
+                        mode = 'ks';
                     } else if (document.getElementById('tab-masuk').classList.contains('active')) {
                         mode = 'masuk';
                     } else if (document.getElementById('tab-dashboard').classList.contains('active')) {
@@ -8374,7 +8865,7 @@ let currentGroup = '', groupId = 0;
         // Reset mode: lupakan penandaan "kamera diblokir" lalu coba kamera live lagi
         function resetScanMode() {
             safeStore.remove('BARCODE_SCAN_MODE');
-            if (_html5Qr && _scanLive) { _html5Qr.stop().catch(() => {}); _scanLive = false; }
+            _scanStopLive();
             if (_scanTarget) openBarcodeScanner(_scanTarget.mode, _scanTarget.inputId);
         }
 
@@ -8399,7 +8890,7 @@ let currentGroup = '', groupId = 0;
                 setTimeout(() => finish(null), 4000);
 
                 try {
-                    BarcodeDetector.getSupportedFormats()
+                    _nativeScanFormats()
                         .then(formats => {
                             if (!formats || !formats.length) return finish(null);
                             const detector = new BarcodeDetector({ formats: formats });
@@ -8430,6 +8921,7 @@ let currentGroup = '', groupId = 0;
                 _decodeBarcodeNative(file).then(code => {
                     if (code) { _scanLock = false; return _onBarcodeScanned(code); }
                     // 2) Belum terbaca / API tidak tersedia → jalur lama, tidak diubah.
+                    if (typeof Html5Qrcode === 'undefined') return _tryOcrNameFallback(file, statusEl);
                     if (!_html5Qr) _html5Qr = new Html5Qrcode('barcode-reader');
                     _html5Qr.scanFile(file, true)
                         .then(decodedText => { _scanLock = false; _onBarcodeScanned(decodedText); })
@@ -8438,11 +8930,8 @@ let currentGroup = '', groupId = 0;
             };
 
             // Hentikan live scan dulu jika sedang berjalan agar tidak bentrok
-            if (_html5Qr && _scanLive) {
-                _html5Qr.stop().then(() => { _scanLive = false; doScan(); }).catch(() => { _scanLive = false; doScan(); });
-            } else {
-                doScan();
-            }
+            if (_scanLive) _scanStopLive().then(doScan);
+            else doScan();
         }
 
         // Cari item master yang cocok dengan hasil scan menggunakan _barcodeIndex
@@ -8521,19 +9010,25 @@ let currentGroup = '', groupId = 0;
                 });
         }
 
+        /** Pesan seragam saat kode terbaca tapi tak ada item master yang cocok. */
+        function _scanNotFound(text) {
+            showAlert('Tidak Ditemukan', 'Barcode "' + text + '" tidak cocok dengan item master manapun.', 'warning');
+        }
+
         function _onBarcodeScanned(text) {
             if (_scanLock) return; // trap: cegah trigger ganda dari frame beruntun
             _scanLock = true;
-            closeBarcodeScanner();
 
             // 1) Coba cocokkan sebagai kode barcode dulu.
             // 2) Jika tak cocok, coba cocokkan sebagai TEKS NAMA item (hasil OCR fallback).
+            // Pencocokan memakai Map (instan) sehingga nada penanda bisa dibunyikan
+            // SEBELUM kamera ditutup & DOM diperbarui → terasa secepat scanner kasir.
             const item = _findItemByBarcode(text) || _findItemByName(text);
+            _scanBeep(!!item);
+            closeBarcodeScanner();
 
             if (_scanTarget && _scanTarget.mode === 'keluar') {
-                if (!item) {
-                    return showAlert('Tidak Ditemukan', 'Barcode "' + text + '" tidak cocok dengan item master manapun.', 'warning');
-                }
+                if (!item) return _scanNotFound(text);
                 const st = (item.status || '').toUpperCase().trim();
                 if (st !== 'AKTIF' && st !== 'AKTIV') {
                     return showAlert('Item Nonaktif', stripCode(item.namaItem) + ' berstatus NONAKTIF dan tidak bisa dikeluarkan.', 'warning');
@@ -8544,21 +9039,24 @@ let currentGroup = '', groupId = 0;
                     _scanFeedback(true, stripCode(item.namaItem));
                 }
             } else if (_scanTarget && _scanTarget.mode === 'masuk') {
-                if (!item) {
-                    return showAlert('Tidak Ditemukan', 'Barcode "' + text + '" tidak cocok dengan item master manapun.', 'warning');
-                }
+                if (!item) return _scanNotFound(text);
                 if (inTomSelect) {
                     inTomSelect.setValue(item.namaItem);
                     document.getElementById('in-qty').focus();
                     _scanFeedback(true, stripCode(item.namaItem));
                 }
+            } else if (_scanTarget && _scanTarget.mode === 'ks') {
+                // [UPGRADE] Scan DARI halaman Kartu Stock Detail: item terpilih
+                // diganti di tempat — halaman tidak ditutup & filter periode
+                // (bulan berjalan) tetap dipertahankan.
+                if (!item) return _scanNotFound(text);
+                _scanFeedback(true, stripCode(item.namaItem));
+                _ksSelectItem(item.namaItem);
             } else if (_scanTarget && _scanTarget.mode === 'log') {
                 // [UPGRADE] Scan dari Dashboard: sekali scan langsung membuka
                 // Kartu Stock Detail (log) item yang cocok. Scan di form Keluar /
                 // Masuk TIDAK ikut berubah — tetap mengisi dropdown transaksi.
-                if (!item) {
-                    return showAlert('Tidak Ditemukan', 'Barcode "' + text + '" tidak cocok dengan item master manapun.', 'warning');
-                }
+                if (!item) return _scanNotFound(text);
                 _scanFeedback(true, stripCode(item.namaItem));
                 _openKsDetailForItem(item.namaItem);
             } else if (_scanTarget && _scanTarget.mode === 'search') {
@@ -9034,8 +9532,13 @@ let currentGroup = '', groupId = 0;
             document.querySelectorAll('.mnav-btn[data-tab], .more-item[data-tab]').forEach(btn => {
                 btn.style.display = allowed.includes(btn.getAttribute('data-tab')) ? '' : 'none';
             });
+            const canOut = allowed.includes('tab-keluar');
             const fab = document.getElementById('mnav-fab');
-            if (fab) fab.style.display = allowed.includes('tab-keluar') ? '' : 'none';
+            if (fab) fab.style.display = canOut ? '' : 'none';
+            // [UPGRADE] Tombol "Tambah Keluar barang" di Riwayat Keluar mengikuti
+            // hak akses yang sama dengan tab "Keluar" yang sudah digabung.
+            const btnAddOut = document.getElementById('btn-add-outbound');
+            if (btnAddOut) btnAddOut.style.display = canOut ? '' : 'none';
             const moreBtn = document.getElementById('mnav-more');
             if (moreBtn) {
                 const anyMore = ['tab-masuk', 'tab-opname', 'tab-master', 'tab-users'].some(t => allowed.includes(t));
