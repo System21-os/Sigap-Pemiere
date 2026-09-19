@@ -156,19 +156,263 @@
     // URL Web App Apps Script (deployment /exec).
     const GAS_URL = "https://script.google.com/macros/s/AKfycbwwSrisKW7V8-eDqU7is9R78-oitvEmwWwp2JzKf6OsCtBaNejlydCP1RA_nQmgJ-nJ/exec";
 
+    // =====================================================================
+    // [FIX] TRANSPORT BAWAAN HTMLSERVICE DITANGKAP SEBELUM DITIMPA
+    // ---------------------------------------------------------------------
+    // MASALAH YANG DIPERBAIKI DI SINI — inilah sebab versi Apps Script terasa
+    // JAUH lebih lambat daripada versi GitHub Pages saat login.
+    //
+    // Beberapa baris di bawah, berkas ini MENIMPA window.google.script dengan
+    // jembatan fetch buatan sendiri. Itu memang benar dan perlu di GitHub Pages,
+    // karena di sana `google.script.run` bawaan memang TIDAK ADA.
+    //
+    // Tetapi penimpaan itu dilakukan TANPA SYARAT. Jadi ketika halaman yang sama
+    // disajikan OLEH Apps Script lewat doGet(), jembatan BAWAAN yang cepat —
+    // yang sudah tersambung ke frame induk dan memakai container yang baru saja
+    // dipakai doGet() — ikut DIHANCURKAN, lalu digantikan jalur yang jauh lebih
+    // mahal:
+    //
+    //   BAWAAN (HtmlService)           : 1 lompatan lewat jembatan sandbox
+    //                                    yang sambungannya sudah terbuka.
+    //
+    //   FETCH ke /exec dari sandbox    : DNS + TLS ke script.google.com,
+    //                                    lalu REDIRECT 302 ke
+    //                                    script.googleusercontent.com
+    //                                    (DNS + TLS LAGI), lintas-origin,
+    //                                    dan berpeluang membangunkan eksekusi
+    //                                    Apps Script yang terpisah.
+    //
+    // Artinya di versi Apps Script, SETIAP checkSession dan SETIAP loginUser
+    // membayar ongkos jaringan penuh dua kali — padahal jalan pintasnya ada dan
+    // sudah tersedia sejak halaman dimuat. Di versi GitHub Pages ongkos itu
+    // memang tidak terhindarkan, jadi di sanalah gejalanya tidak terasa.
+    //
+    // PERBAIKAN: jembatan bawaan ditangkap lebih dulu di sini, lalu dipakai
+    // sebagai TRANSPORT di dalam SIGAPGateway. Seluruh lapisan yang sudah
+    // dibangun (penggabungan permintaan kembar, prioritas P0/P1/P2, batas waktu
+    // per jenis aksi, deteksi panggilan tulis untuk membatalkan foto data) TETAP
+    // berjalan apa adanya — yang berubah hanya cara pesannya dikirim.
+    //
+    // Satu berkas, dua cara hosting, satu jalur kode.
+    // =====================================================================
+    var _NATIVE_GS = null;
+    try {
+        if (window.google && window.google.script && window.google.script.run) {
+            _NATIVE_GS = window.google.script;   // disajikan oleh HtmlService
+        }
+    } catch (e) { _NATIVE_GS = null; }
+
+    // =====================================================================
+    // [PERF] SIGAPPerf — PENGUKUR WAKTU INTERNAL
+    // ---------------------------------------------------------------------
+    // Tanpa angka, "terasa lebih cepat" hanyalah pendapat. Lapisan ini mencatat
+    // durasi tiap tahap (login, boot, permintaan, transaksi) supaya perbandingan
+    // sebelum/sesudah bisa dibuktikan, bukan dikira-kira.
+    //
+    // MATI secara baku di produksi — tidak ada biaya dan tidak ada yang tercetak
+    // di console. Dinyalakan dengan menjalankan SIGAPPerf.on() di console, atau
+    // menambahkan ?perf=1 pada alamat halaman. Pilihannya diingat di localStorage.
+    //
+    // TIDAK PERNAH mencatat isi data: hanya nama aksi, durasi, ukuran muatan,
+    // status, dan jumlah percobaan ulang.
+    // =====================================================================
+    window.SIGAPPerf = (function () {
+        var aktif = false;
+        try {
+            aktif = localStorage.getItem('SIGAP_PERF') === '1' ||
+                    /[?&]perf=1(&|$)/.test(location.search);
+        } catch (e) { aktif = false; }
+
+        var catatan = [];
+        var MAX = 400;              // buffer melingkar — tidak pernah tumbuh tanpa batas
+        var mulai = {};
+
+        function now() { try { return performance.now(); } catch (e) { return Date.now(); } }
+
+        function rekam(tahap, detail) {
+            if (!aktif) return;
+            var baris = { t: Math.round(now()), tahap: tahap };
+            if (detail) for (var k in detail) if (detail.hasOwnProperty(k)) baris[k] = detail[k];
+            catatan.push(baris);
+            if (catatan.length > MAX) catatan.shift();
+            try { console.debug('[PERF]', tahap, detail || ''); } catch (e) {}
+        }
+
+        return {
+            aktif: function () { return aktif; },
+            on:  function () { aktif = true;  try { localStorage.setItem('SIGAP_PERF', '1'); } catch (e) {} },
+            off: function () { aktif = false; try { localStorage.removeItem('SIGAP_PERF'); } catch (e) {} },
+            mark: rekam,
+            /** Mulai pengukuran bernama. Kembalikan fungsi penutupnya. */
+            start: function (nama, detail) {
+                if (!aktif) return function () {};
+                var t0 = now();
+                mulai[nama] = t0;
+                rekam(nama + '_START', detail);
+                return function (hasil) {
+                    var ms = Math.round(now() - t0);
+                    var d = { ms: ms };
+                    if (hasil) for (var k in hasil) if (hasil.hasOwnProperty(k)) d[k] = hasil[k];
+                    rekam(nama + '_END', d);
+                    return ms;
+                };
+            },
+            /** Seluruh catatan mentah — dipakai saat membandingkan sebelum/sesudah. */
+            dump: function () { return catatan.slice(); },
+            /** Ringkasan per tahap: jumlah, rata-rata, terkecil, terbesar (ms). */
+            report: function () {
+                var g = {};
+                catatan.forEach(function (r) {
+                    if (typeof r.ms !== 'number') return;
+                    var k = r.tahap.replace(/_END$/, '');
+                    if (!g[k]) g[k] = { n: 0, total: 0, min: Infinity, max: 0 };
+                    g[k].n++; g[k].total += r.ms;
+                    if (r.ms < g[k].min) g[k].min = r.ms;
+                    if (r.ms > g[k].max) g[k].max = r.ms;
+                });
+                var out = Object.keys(g).map(function (k) {
+                    return { tahap: k, n: g[k].n, avg: Math.round(g[k].total / g[k].n), min: g[k].min, max: g[k].max };
+                }).sort(function (a, b) { return b.avg - a.avg; });
+                try { console.table(out); } catch (e) { console.log(out); }
+                return out;
+            },
+            reset: function () { catatan = []; mulai = {}; }
+        };
+    })();
+
     window.SIGAPGateway = (function () {
         // 60 detik: cold start Apps Script bisa 8 detik, dan unggah foto item
         // (base64) memakan waktu jauh lebih lama daripada permintaan data biasa.
         const TIMEOUT_DEFAULT = 60000;
         const inflight = new Map();   // permintaan identik yang sedang berjalan
 
+        // -----------------------------------------------------------------
+        // [PERF] BATAS WAKTU PER JENIS PERMINTAAN
+        // -----------------------------------------------------------------
+        // Versi lama memakai 60 detik untuk SEMUANYA. Itu dua kesalahan sekaligus:
+        // terlalu lama untuk pemeriksaan sesi (user menatap layar kosong padahal
+        // jawabannya pasti cepat) dan terlalu pendek untuk unggah foto.
+        //
+        // Yang paling penting: batas waktu untuk TULIS sengaja dibuat LONGGAR.
+        // Batas yang terlalu agresif pada jalur tulis adalah cara paling mudah
+        // menciptakan transaksi ganda — client menyerah, mengirim ulang, padahal
+        // yang pertama sebenarnya sudah tersimpan di server.
+        const TIMEOUT_KELAS = {
+            AUTH:   20000,   // loginUser / checkSession / logoutUser
+            READ:   45000,   // pembacaan biasa
+            HEAVY:  90000,   // bootstrap, laporan, rekomendasi
+            WRITE:  90000,   // simpan / ubah / hapus  -> paling longgar
+            UPLOAD: 180000   // unggah foto (base64)
+        };
+        const AKSI_AUTH   = { loginUser: 1, logoutUser: 1, checkSession: 1, verifyTransaction: 1 };
+        const AKSI_HEAVY  = {
+            getBootstrapData: 1, getSmartExpRecommendation: 1, getExpMonitorData: 1,
+            getOpnameReport: 1, getStockCardData: 1, getOutboundData: 1, getInboundData: 1
+        };
+        const AKSI_UPLOAD = { uploadItemImage: 1 };
+
+        function kelasAksi(action) {
+            if (AKSI_UPLOAD[action]) return 'UPLOAD';
+            if (AKSI_AUTH[action])   return 'AUTH';
+            if (AKSI_HEAVY[action])  return 'HEAVY';
+            return BACA_SAJA.test(action || '') ? 'READ' : 'WRITE';
+        }
+
+        // -----------------------------------------------------------------
+        // [ERROR] JENIS KESALAHAN YANG DIBEDAKAN
+        // -----------------------------------------------------------------
+        // Sebelumnya semua kegagalan berakhir sebagai "Koneksi server gagal",
+        // termasuk yang sebenarnya bukan masalah koneksi sama sekali. `kind`
+        // memberi client dasar untuk memutuskan: yang mana boleh dicoba ulang,
+        // yang mana harus langsung ditampilkan ke user.
+        //
+        // `code` TETAP seperti semula — SIGAPNet._isTransportBreak() membacanya,
+        // jadi menghapusnya akan merusak deteksi transport yang sudah berjalan.
+        const KIND_DARI_KODE = {
+            TIMEOUT:    'TIMEOUT',
+            JARINGAN:   'NETWORK_ERROR',
+            BUKAN_JSON: 'SERVER_ERROR',
+            JSON_RUSAK: 'SERVER_ERROR',
+            KOSONG:     'SERVER_ERROR',
+            HTTP_401:   'AUTH_ERROR',
+            HTTP_403:   'AUTH_ERROR',
+            HTTP_429:   'SERVER_ERROR',
+            HTTP_500:   'SERVER_ERROR',
+            HTTP_503:   'SERVER_ERROR',
+            // Fungsi tidak ada di backend yang ter-deploy. Ini BUKAN gangguan
+            // sesaat — mengulangnya seribu kali pun hasilnya sama.
+            AKSI_TIDAK_DIKENAL: 'SERVER_ERROR'
+        };
+
         function gasError(kode, pesan) {
             const e = new Error(pesan);
             e.code = kode;
+            e.kind = KIND_DARI_KODE[kode] || (/^HTTP_/.test(kode) ? 'SERVER_ERROR' : 'UNKNOWN');
+            // Hanya kegagalan yang memang sesaat yang layak dicoba ulang.
+            e.retryable = (e.kind === 'TIMEOUT' || e.kind === 'NETWORK_ERROR' || kode === 'HTTP_429' ||
+                           kode === 'HTTP_500' || kode === 'HTTP_502' || kode === 'HTTP_503');
             return e;
         }
 
+        /**
+         * Pemilih transport. Isi pesan, nama aksi, dan bentuk jawabannya SAMA
+         * PERSIS di kedua jalur — yang berbeda hanya caranya sampai ke server.
+         *   HtmlService (doGet)  -> jembatan bawaan, cepat
+         *   GitHub Pages / lain  -> fetch ke /exec, seperti sebelumnya
+         */
         function kirim(action, payload, timeoutMs) {
+            return _NATIVE_GS ? kirimNative(action, payload, timeoutMs)
+                              : kirimFetch(action, payload, timeoutMs);
+        }
+
+        /**
+         * Transport bawaan HtmlService.
+         * doPost() memanggil fn(body.data); di sini runner[action](payload)
+         * memanggil fn(payload) — argumen yang diterima fungsi backend identik,
+         * jadi tidak ada satu pun endpoint yang perlu diubah.
+         */
+        function kirimNative(action, payload, timeoutMs) {
+            const batas = timeoutMs || TIMEOUT_DEFAULT;
+            return new Promise(function (resolve, reject) {
+                let selesai = false;
+                const timer = setTimeout(function () {
+                    if (selesai) return;
+                    selesai = true;
+                    reject(gasError('TIMEOUT',
+                        'Server belum menjawab dalam ' + Math.round(batas / 1000) + ' detik.'));
+                }, batas);
+
+                const sukses = function (data) {
+                    if (selesai) return;
+                    selesai = true; clearTimeout(timer);
+                    resolve(data);
+                };
+                const gagal = function (err) {
+                    if (selesai) return;
+                    selesai = true; clearTimeout(timer);
+                    reject(gasError('JARINGAN',
+                        (err && err.message) || 'Tidak dapat menghubungi server.'));
+                };
+
+                try {
+                    // `.run` diakses SETIAP kali, bukan disimpan: di HtmlService
+                    // properti itu menghasilkan rantai pemanggil yang baru, dan
+                    // memakai ulang rantai lama akan menumpuk handler.
+                    const runner = _NATIVE_GS.run.withSuccessHandler(sukses).withFailureHandler(gagal);
+                    if (typeof runner[action] !== 'function') {
+                        // Fungsi tidak ada di backend yang sedang ter-deploy.
+                        // Kodenya dibedakan supaya antrean transaksi bisa
+                        // mengenalinya dan TIDAK mengirim ulang secara buta.
+                        selesai = true; clearTimeout(timer);
+                        reject(gasError('AKSI_TIDAK_DIKENAL', 'Aksi tidak dikenal: ' + action));
+                        return;
+                    }
+                    runner[action](payload === undefined ? {} : payload);
+                } catch (e) { gagal(e); }
+            });
+        }
+
+        function kirimFetch(action, payload, timeoutMs) {
             const ac = ('AbortController' in window) ? new AbortController() : null;
             let timer = null;
             const batas = timeoutMs || TIMEOUT_DEFAULT;
@@ -236,15 +480,140 @@
          * Panggil satu fungsi backend. Permintaan identik yang sedang berjalan
          * DIGABUNG — tidak dikirim dua kali.
          */
+        // -----------------------------------------------------------------
+        // [PERF] DETEKSI PANGGILAN TULIS — SATU TITIK, TIDAK BISA TERLEWAT
+        // -----------------------------------------------------------------
+        // Foto data (SIGAPCache) harus dibuang setiap kali user MENGUBAH data,
+        // supaya pembukaan berikutnya tidak mungkin menampilkan angka sebelum
+        // transaksi itu. Daripada menambal puluhan handler simpan satu per satu
+        // — yang pasti ada yang terlewat — pemeriksaannya diletakkan di SINI,
+        // satu-satunya pintu yang dilalui SEMUA panggilan backend (baik lewat
+        // google.script.run maupun SIGAPNet, keduanya bermuara ke fungsi ini).
+        //
+        // Arahnya sengaja dibuat AMAN-GAGAL: yang didaftarkan adalah panggilan
+        // BACA. Apa pun yang namanya tidak dikenali sebagai baca dianggap TULIS.
+        // Jadi kalau nanti ada endpoint baru dan developer lupa mendaftarkannya,
+        // akibat terburuknya hanyalah satu kali boot yang lebih lambat —
+        // BUKAN user melihat angka stok yang salah.
+        // `verify` ikut didaftarkan: verifyTransaction HANYA membaca penanda
+        // idempotensi di backend dan tidak menyentuh satu pun sheet. Tanpa ini,
+        // setiap pemeriksaan status transaksi akan membuang foto data — padahal
+        // pemeriksaan itu justru paling sering dilakukan tepat setelah koneksi
+        // bermasalah, yaitu saat foto paling dibutuhkan.
+        const BACA_SAJA = /^(get|list|peek|check|fetch|load|search|find|preview|count|export|verify)/i;
+
+        // Panggilan seputar SESI bukan perubahan data stok, jadi tidak boleh
+        // membuang foto. Ini penting untuk `loginUser`: tanpa pengecualian ini,
+        // login justru menghapus foto yang baru saja akan dipakai untuk mengisi
+        // layar — persis kebalikan dari tujuan cache-nya. Pembersihan saat
+        // logout tetap dilakukan secara eksplisit di doLogout().
+        const AUTH_ACTIONS = { loginUser: 1, logoutUser: 1, checkSession: 1 };
+
+        function _mungkinMengubahData(action) {
+            if (!action) return false;
+            if (AUTH_ACTIONS[action]) return false;
+            return !BACA_SAJA.test(action);
+        }
+
+        // =================================================================
+        // [PERF] PENJADWAL BERPRIORITAS — P0 > P1 > P2
+        // -----------------------------------------------------------------
+        // MASALAH: versi lama menembakkan setiap permintaan SEKETIKA, tanpa
+        // batas jumlah yang berjalan bersamaan. Apps Script membatasi eksekusi
+        // serentak per user, jadi kelebihannya MENGANTRE DI SISI GOOGLE —
+        // di tempat yang tidak bisa kita atur urutannya. Akibatnya permintaan
+        // penyimpanan transaksi bisa terjebak di belakang permintaan analitik
+        // yang tidak seorang pun sedang menunggunya.
+        //
+        // Sekarang antrean dipegang di sini, di tempat urutannya bisa diatur:
+        //
+        //   P0  TRANSAKSI / INPUT USER  -> selalu berangkat DULUAN, dan tidak
+        //                                  pernah ditahan batas jumlah.
+        //   P1  DATA UI YANG DIBUTUHKAN -> batas jumlah berlaku.
+        //   P2  ANALITIK / SEKUNDER     -> paling akhir.
+        //
+        // Batasnya dibuat kecil dengan sengaja: dua permintaan berjalan yang
+        // benar-benar selesai lebih baik daripada enam yang saling berebut.
+        // =================================================================
+        const P0 = 0, P1 = 1, P2 = 2;
+        const MAX_SERENTAK = 2;          // hanya berlaku untuk P1 & P2
+        const antre = [[], [], []];      // indeks = prioritas
+        let   berjalan = 0;
+
+        // Prioritas baku per aksi, dipakai kalau pemanggil tidak menyebut sendiri.
+        // Semua jalur TULIS otomatis P0: itulah yang sedang ditunggu user.
+        const AKSI_P2 = {
+            getSmartExpRecommendation: 1, getOpnameReport: 1, getItemImages: 1,
+            getItemDetailLog: 1, getBackendInfo: 1, getRecipeData: 1, getConvertData: 1
+        };
+        function prioritasBaku(action) {
+            if (AKSI_AUTH[action]) return P0;                    // login & sesi menahan seluruh layar
+            if (!BACA_SAJA.test(action || '')) return P0;         // seluruh penulisan
+            if (AKSI_P2[action]) return P2;
+            return P1;
+        }
+
+        function jadwalkan() {
+            // P0 tidak pernah menunggu: dikuras habis lebih dulu.
+            while (antre[P0].length) { jalankan(antre[P0].shift()); }
+            for (let p = P1; p <= P2; p++) {
+                while (antre[p].length && berjalan < MAX_SERENTAK) jalankan(antre[p].shift());
+            }
+        }
+
+        function jalankan(tugas) {
+            berjalan++;
+            const habis = SIGAPPerf.start('REQUEST', { action: tugas.action, prio: tugas.prio });
+            kirim(tugas.action, tugas.payload, tugas.timeout)
+                .then(function (data) {
+                    habis({ status: 'ok' });
+                    tugas.resolve(data);
+                }, function (err) {
+                    habis({ status: 'gagal', code: (err && err.code) || '', kind: (err && err.kind) || '' });
+                    tugas.reject(err);
+                })
+                .then(function () { berjalan--; jadwalkan(); });
+        }
+
         function call(action, payload, opts) {
             opts = opts || {};
+
+            // Dibuang SAAT PERMINTAAN DIKIRIM, bukan saat berhasil. Sebuah
+            // permintaan tulis yang kehabisan waktu di sisi klien BISA SAJA
+            // tetap tersimpan di sisi server; membuang foto lebih awal membuat
+            // keadaan itu pun tetap aman.
+            if (_mungkinMengubahData(action)) {
+                try { if (window.__sigapOnWrite) window.__sigapOnWrite(action); } catch (e) {}
+            }
+
             let kunci = null;
             try { kunci = action + '|' + JSON.stringify(payload === undefined ? null : payload); } catch (e) { kunci = null; }
 
-            if (kunci && inflight.has(kunci)) return inflight.get(kunci);
+            // [PERF] PENGGABUNGAN PERMINTAAN KEMBAR.
+            // Kunci sudah memuat aksi + seluruh muatan, jadi tiga bagian layar
+            // yang meminta getMasterData() bersamaan tetap menghasilkan SATU
+            // permintaan backend dengan tiga penerima hasil.
+            //
+            // Penulisan SENGAJA dikecualikan. Dua penyimpanan dengan isi yang
+            // sama persis bisa saja memang dua transaksi yang berbeda; yang
+            // berhak memutuskan itu adalah penanda idempotensi di backend,
+            // bukan tebakan berdasarkan kesamaan muatan di sini.
+            const bolehGabung = BACA_SAJA.test(action || '') || AKSI_AUTH[action];
+            if (kunci && bolehGabung && inflight.has(kunci)) {
+                SIGAPPerf.mark('REQUEST_DEDUPE', { action: action });
+                return inflight.get(kunci);
+            }
 
-            const p = kirim(action, payload, opts.timeout);
-            if (kunci) {
+            const prio = (opts.priority == null) ? prioritasBaku(action) : opts.priority;
+            const timeout = opts.timeout || TIMEOUT_KELAS[kelasAksi(action)] || TIMEOUT_DEFAULT;
+
+            const p = new Promise(function (resolve, reject) {
+                antre[prio].push({ action: action, payload: payload, timeout: timeout,
+                                   prio: prio, resolve: resolve, reject: reject });
+                jadwalkan();
+            });
+
+            if (kunci && bolehGabung) {
                 inflight.set(kunci, p);
                 p.then(function () { inflight.delete(kunci); },
                        function () { inflight.delete(kunci); });
@@ -252,7 +621,18 @@
             return p;
         }
 
-        return { call: call, url: function () { return GAS_URL; } };
+        return {
+            call: call,
+            url: function () { return GAS_URL; },
+            P0: P0, P1: P1, P2: P2,
+            /** Transport yang sedang dipakai — untuk memastikan saat mendiagnosis. */
+            transport: function () { return _NATIVE_GS ? 'HTMLSERVICE_NATIVE' : 'FETCH_EXEC'; },
+            /** Keadaan antrean — dipakai saat mengukur, bukan oleh logika aplikasi. */
+            stats: function () {
+                return { transport: _NATIVE_GS ? 'HTMLSERVICE_NATIVE' : 'FETCH_EXEC',
+                         berjalan: berjalan, p0: antre[P0].length, p1: antre[P1].length, p2: antre[P2].length };
+            }
+        };
     })();
 
     // ---------------------------------------------------------------------
@@ -291,7 +671,13 @@
         },
         // Di GitHub Pages halaman berjalan sebagai halaman biasa (bukan iframe
         // sandbox Apps Script), jadi alamatnya cukup diambil dari location.
-        url: {
+        //
+        // Di HtmlService keadaannya kebalikannya: location milik IFRAME SANDBOX,
+        // bukan halaman /exec induk, sehingga membacanya menghasilkan alamat
+        // yang salah — dan tombol "Buka Ulang Aplikasi" pada dialog pemulihan
+        // akan mengarah ke tempat yang tidak bisa disajikan sendiri. Karena itu
+        // bila jembatan bawaan ada, MILIKNYA yang dipakai.
+        url: (_NATIVE_GS && _NATIVE_GS.url) ? _NATIVE_GS.url : {
             getLocation: function (cb) {
                 if (typeof cb !== 'function') return;
                 let param = {}, params = {};
@@ -304,7 +690,8 @@
                 cb({ hash: (location.hash || '').replace(/^#/, ''), parameter: param, parameters: params, href: location.href });
             }
         },
-        host: { close: function () {}, setWidth: function () {}, setHeight: function () {},
+        host: (_NATIVE_GS && _NATIVE_GS.host) ? _NATIVE_GS.host : {
+                close: function () {}, setWidth: function () {}, setHeight: function () {},
                 origin: location.origin, editor: { focus: function () {} } }
     };
 </script>
@@ -3791,6 +4178,151 @@
             .btn:active { transform: none; }
         }
 
+        /* ============================================================
+           [PERF] PENANDA DATA TERSIMPAN (snapshot / stale-while-revalidate)
+           Muncul saat layar diisi dari foto data terakhir sementara data
+           asli masih diambil dari server. Sengaja TIDAK menutupi konten —
+           hanya menempel di bawah layar supaya user tetap bisa bekerja.
+           ============================================================ */
+        .snapshot-bar {
+            position: fixed;
+            left: 50%;
+            bottom: 18px;
+            transform: translateX(-50%) translateY(140%);
+            z-index: 900;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            max-width: min(560px, calc(100vw - 32px));
+            padding: 10px 14px;
+            border-radius: 12px;
+            background: var(--surface);
+            border: 1px solid var(--accent-brd);
+            box-shadow: 0 8px 28px rgba(0, 0, 0, 0.16);
+            color: var(--text-muted);
+            font-size: 0.78rem;
+            font-weight: 600;
+            line-height: 1.45;
+            opacity: 0;
+            pointer-events: none;
+            transition: transform .32s cubic-bezier(.16,1,.3,1), opacity .32s ease;
+        }
+        .snapshot-bar.show {
+            transform: translateX(-50%) translateY(0);
+            opacity: 1;
+            pointer-events: auto;
+        }
+        .snapshot-bar i { font-size: 1.15rem; color: var(--accent); flex-shrink: 0; }
+        .snapshot-bar b { color: var(--text); }
+        .snapshot-bar button {
+            flex-shrink: 0;
+            margin-left: 2px;
+            padding: 6px 12px;
+            border-radius: 8px;
+            border: 1px solid var(--accent-brd);
+            background: var(--accent-soft);
+            color: var(--accent);
+            font-size: 0.74rem;
+            font-weight: 700;
+            cursor: pointer;
+        }
+        .snapshot-bar.is-error { border-color: rgba(220,38,38,0.35); }
+        .snapshot-bar.is-error i { color: var(--red); }
+
+        /* Di layar sempit penanda memakai lebar penuh dan naik di atas bottom-nav. */
+        @media (max-width: 640px) {
+            .snapshot-bar {
+                left: 12px;
+                right: 12px;
+                max-width: none;
+                transform: translateY(140%);
+                bottom: 84px;
+            }
+            .snapshot-bar.show { transform: translateY(0); }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            .snapshot-bar { transition: opacity .2s ease; }
+        }
+
+        /* ============================================================
+           [DURABILITY] PENANDA SINKRONISASI TRANSAKSI
+           Menggantikan loader penuh layar pada jalur simpan IN/OUT/OPNAME.
+           Sengaja memakai KERANGKA YANG SAMA PERSIS dengan .snapshot-bar
+           (posisi, ukuran, warna, bayangan, animasi, perilaku mobile),
+           supaya terbaca sebagai bagian aplikasi yang sudah ada — bukan
+           komponen baru. Tidak ada warna, font, atau tata letak yang dibuat
+           sendiri; semuanya memakai variabel tema yang sudah dipakai.
+           ============================================================ */
+        .sync-bar {
+            position: fixed;
+            left: 50%;
+            bottom: 18px;
+            transform: translateX(-50%) translateY(140%);
+            z-index: 901;              /* tepat di atas snapshot-bar bila keduanya tampil */
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            max-width: min(560px, calc(100vw - 32px));
+            padding: 10px 14px;
+            border-radius: 12px;
+            background: var(--surface);
+            border: 1px solid var(--accent-brd);
+            box-shadow: 0 8px 28px rgba(0, 0, 0, 0.16);
+            color: var(--text-muted);
+            font-size: 0.78rem;
+            font-weight: 600;
+            line-height: 1.45;
+            opacity: 0;
+            pointer-events: none;
+            transition: transform .32s cubic-bezier(.16,1,.3,1), opacity .32s ease;
+        }
+        .sync-bar.show {
+            transform: translateX(-50%) translateY(0);
+            opacity: 1;
+            pointer-events: auto;
+        }
+        .sync-bar i { font-size: 1.15rem; color: var(--accent); flex-shrink: 0; }
+        .sync-bar b { color: var(--text); }
+        .sync-bar button {
+            flex-shrink: 0;
+            margin-left: 2px;
+            padding: 6px 12px;
+            border: 1px solid var(--accent-brd);
+            border-radius: 8px;
+            background: var(--accent-soft);
+            color: var(--accent);
+            font-size: 0.74rem;
+            font-weight: 700;
+            cursor: pointer;
+        }
+        .sync-bar.is-ok    { border-color: var(--accent-brd); }
+        .sync-bar.is-ok i  { color: var(--green, var(--accent)); }
+        .sync-bar.is-warn  { border-color: rgba(217,119,6,0.35); }
+        .sync-bar.is-warn i{ color: var(--amber, var(--accent)); }
+        .sync-bar.is-error { border-color: rgba(220,38,38,0.35); }
+        .sync-bar.is-error i { color: var(--red); }
+        .sync-bar .spin-ico { animation: spin 1s linear infinite; }
+
+        @media (max-width: 640px) {
+            .sync-bar {
+                left: 12px;
+                right: 12px;
+                max-width: none;
+                transform: translateY(140%);
+                bottom: 84px;
+            }
+            .sync-bar.show { transform: translateY(0); }
+            /* Bila penanda foto data ikut tampil, penanda sinkron naik di atasnya
+               supaya keduanya tidak pernah saling menutupi. */
+            body.has-snapshot-bar .sync-bar { bottom: 140px; }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            .sync-bar { transition: opacity .2s ease; }
+            .sync-bar .spin-ico { animation: none; }
+        }
+
     </style>
     <!-- bwip-js & jsPDF dipindahkan ke pemuatan on-demand (SIGAPLib) di atas:
          keduanya hanya dipakai layar Cetak Barcode / Lembar Barcode, jadi tidak
@@ -6536,11 +7068,42 @@
             return _activeItemSet.has(namaItem);
         }
 
+        // [PERF] Dulu fungsi ini men-SCAN seluruh globalMasterData dan memanggil
+        // stripCode() pada SETIAP elemen — padahal ia sendiri dipanggil sekali per
+        // baris di dalam filter Kartu Stock. Untuk 500 baris stock x 800 master itu
+        // 400.000 perbandingan string SETIAP kali user mengetik di kotak cari.
+        // Itulah sumbat utama rasa "lemot" saat memfilter lokasi.
+        //
+        // Sekarang indeksnya dibangun SEKALI (O(n)) lalu dibaca O(1). Indeks
+        // ditandai dengan REFERENSI array sumbernya: globalMasterData di berkas ini
+        // selalu di-ASSIGN ulang (tidak pernah diubah di tempat), jadi begitu
+        // datanya berganti referensinya ikut berganti dan indeks otomatis dibangun
+        // ulang. Tidak ada satu pun aturan bisnis yang berubah — hasil yang
+        // dikembalikan sama persis, termasuk default 'GUDANG'.
+        let _lokasiIndexSrc = null;
+        let _lokasiIndex    = new Map();
+
+        function _buildLokasiIndex() {
+            const src = globalMasterData || [];
+            _lokasiIndex = new Map();
+            for (const m of src) {
+                const key = stripCode(m.namaItem || '').toLowerCase();
+                // `find()` mengembalikan yang PERTAMA cocok — supaya hasilnya
+                // identik, entri duplikat berikutnya tidak menimpa yang pertama.
+                // Kunci kosong pun tetap dimasukkan agar perilakunya persis sama
+                // dengan `find()` yang lama pada baris master tanpa nama.
+                if (!_lokasiIndex.has(key)) {
+                    _lokasiIndex.set(key, m.lokasi ? m.lokasi.toUpperCase() : '');
+                }
+            }
+            _lokasiIndexSrc = src;
+        }
+
         function _getLokasiItem(namaItem) {
             if (!globalMasterData) return 'GUDANG';
+            if (_lokasiIndexSrc !== globalMasterData) _buildLokasiIndex();
             const norm = stripCode(namaItem || '').toLowerCase();
-            const it = globalMasterData.find(m => stripCode(m.namaItem || '').toLowerCase() === norm);
-            return it && it.lokasi ? it.lokasi.toUpperCase() : 'GUDANG';
+            return _lokasiIndex.get(norm) || 'GUDANG';
         }
 
         // ===================== BOOSTER: INDEX MAP O(1) =====================
@@ -6575,6 +7138,41 @@
         // ===================== HELPERS =====================
         function getJakartaDate() {
             return new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Jakarta" }));
+        }
+
+        // ===================== ESCAPING HTML =====================
+        // [AKURASI] Nama item ditulis langsung ke innerHTML tanpa disaring.
+        // Satu nama yang mengandung & < > " ' sudah cukup untuk membuat sel
+        // tabel tampil salah — atau, pada nama yang berasal dari input user,
+        // menyuntikkan markup ke halaman. Dua helper di bawah menutup itu.
+        //
+        // _escHtml : untuk ISI sel (teks biasa).
+        // _escJsAttr: untuk nilai yang masuk ke dalam onclick="fn('...')" —
+        //             perlu DUA lapis, karena nilainya adalah string JavaScript
+        //             yang berada di dalam atribut HTML. Urutannya penting:
+        //             lolos-kan backslash & kutip satu dulu (lapis JavaScript),
+        //             baru & " < > (lapis HTML). Pola lama yang hanya mengganti
+        //             kutip satu tetap jebol pada nama ber-kutip dua.
+        function _escHtml(v) {
+            if (v == null) return '';
+            const t = String(v);
+            // Jalur cepat: sebagian besar nama item tidak punya karakter khusus
+            // sama sekali, jadi tabel besar tidak membayar biaya replace apa pun.
+            return /[&<>"']/.test(t)
+                ? t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                   .replace(/"/g, '&quot;').replace(/'/g, '&#39;')
+                : t;
+        }
+
+        function _escJsAttr(v) {
+            if (v == null) return '';
+            return String(v)
+                .replace(/\\/g, '\\\\')      // lapis JS: backslash
+                .replace(/'/g, "\\'")        // lapis JS: kutip satu
+                .replace(/&/g, '&amp;')      // lapis HTML
+                .replace(/"/g, '&quot;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;');
         }
 
         // BOOSTER: memoized stripCode
@@ -6999,6 +7597,18 @@
                 altUom: item.altUom || ''
             }));
 
+            // [PERF/UX] Pilihan user DIPERTAHANKAN saat dropdown dibangun ulang.
+            //
+            // Sejak data awal dipasang DUA KALI (sekali dari foto tersimpan agar
+            // layar langsung terisi, sekali lagi dari jawaban server),
+            // initDropdown() ikut berjalan dua kali. Tanpa penjagaan ini, item
+            // yang sudah dipilih user di Form Keluar akan HILANG begitu data
+            // asli tiba — user mengetik, lalu pilihannya tiba-tiba kosong.
+            //
+            // Ini juga menutup masalah lama yang sudah ada sebelumnya: setiap
+            // penyegaran Master Item pun membuang pilihan yang sedang aktif.
+            const pilihanLama = tomSelectInstance ? tomSelectInstance.getValue() : '';
+
             if (tomSelectInstance) { tomSelectInstance.destroy(); tomSelectInstance = null; }
             // Dropdown modal Tambah Masuk ikut di-rebuild saat master berubah
             if (typeof inTomSelect !== 'undefined' && inTomSelect) { inTomSelect.destroy(); inTomSelect = null; }
@@ -7030,6 +7640,18 @@
                     if (found) document.getElementById('out-qty').focus();
                 }
             });
+
+            // Kembalikan pilihan sebelumnya — HANYA bila item itu masih ada dan
+            // masih berstatus AKTIF di data yang baru. Bila item sudah dinonaktifkan
+            // atau dihapus, pilihannya memang harus lepas (aturan bisnisnya tetap:
+            // dropdown Keluar hanya boleh berisi item AKTIF).
+            //
+            // silent = true: pemulihan ini TIDAK boleh memicu onChange, karena
+            // onChange memindahkan fokus ke kolom Qty — sangat mengganggu bila
+            // terjadi tiba-tiba saat data asli tiba di latar belakang.
+            if (pilihanLama && tomSelectInstance.options[pilihanLama]) {
+                try { tomSelectInstance.setValue(pilihanLama, true); } catch (e) {}
+            }
         }
 
         // ===================== STOCK SISA =====================
@@ -7226,21 +7848,42 @@
                 background: 'var(--surface)', color: 'var(--text)'
             }).then(result => {
                 if (!result.isConfirmed) return;
-                showLoader(true);
-                google.script.run
-                    .withSuccessHandler(res => {
-                        showLoader(false);
-                        if (res.success) {
+
+                // =========================================================
+                // [DURABILITY] INPUT DULU -> UI MENJAWAB -> KIRIM DI LATAR
+                // ---------------------------------------------------------
+                // Versi lama: loader penuh layar, lalu MENUNGGU server 2-8 detik
+                // sebelum user boleh melakukan apa pun. Bila koneksi putus di
+                // tengah jalan, seluruh isi keranjang HILANG tanpa jejak.
+                //
+                // Sekarang transaksi dicatat ke antrean tahan-mati-listrik lebih
+                // dulu, baru dikirim. Begitu tercatat, transaksi itu TIDAK BISA
+                // hilang lagi — tutup tab pun antreannya dilanjutkan nanti.
+                //
+                // Yang TIDAK berubah: isi muatan, aturan validasi, penomoran SPB
+                // (tetap dibuat backend), dan seluruh perilaku sesudah tersimpan.
+                // clientTxnId ditambahkan antrean sebagai metadata, dan backend
+                // memakainya untuk memastikan kiriman ulang tidak pernah menjadi
+                // baris kedua di Sheet OUT.
+                // =========================================================
+                const isiKeranjang = cartItems.slice();   // dibekukan saat dikirim
+
+                // Layar dibebaskan SEKARANG — user boleh menyiapkan transaksi
+                // berikutnya sementara yang ini berjalan di latar belakang.
+                cartItems = []; renderCart();
+                closeOutFormModal();
+                _syncBarShow('<i class="ph ph-circle-notch spin-ico"></i><span>Menyimpan ' +
+                    isiKeranjang.length + ' item barang keluar…</span>', 'sync', 0);
+
+                SIGAPQueue.enqueue('saveOutboundData', { tanggal, items: isiKeranjang }, {
+                    label: 'Barang Keluar',
+                    onDone: res => {
+                        if (res && res.success) {
                             let spbText = res.message;
                             if (res.saved && res.saved.length > 0 && res.saved[0].noSpb) {
                                 spbText += "<br><br><b style='color:var(--accent);font-size:1.1rem;'>No SPB: " + res.saved[0].noSpb + "</b>";
                             }
                             Swal.fire({ title: 'Tersimpan!', html: spbText, icon: 'success', background: 'var(--surface)', color: 'var(--text)', confirmButtonColor: 'var(--accent)' });
-                            cartItems = []; renderCart();
-                            // [UPGRADE] Form Keluar kini hanya hidup di dalam modal →
-                            // tutup setelah simpan agar Riwayat Keluar yang sudah
-                            // diperbarui langsung terlihat.
-                            closeOutFormModal();
                             // BOOSTER: tempel baris tersimpan ke data lokal — tanpa refetch penuh
                             if (res.saved && res.saved.length && globalOutboundData.length) {
                                 globalOutboundData = res.saved.concat(globalOutboundData);
@@ -7250,10 +7893,16 @@
                             }
                             globalStockData = [];
                             updateSelectedSisaStock(); loadStockDataSilent();
-                        } else showAlert('Gagal', res.message, 'error');
-                    })
-                    .withFailureHandler(() => { showLoader(false); showAlert('Error', 'Koneksi Server Gagal', 'error'); })
-                    .saveOutboundData({ tanggal, items: cartItems });
+                        } else showAlert('Gagal', (res && res.message) || 'Gagal menyimpan.', 'error');
+                    },
+                    onFail: res => {
+                        // Ditolak server (validasi / akses). Keranjang DIKEMBALIKAN
+                        // supaya user bisa memperbaiki, bukan mengetik ulang.
+                        cartItems = isiKeranjang.slice();
+                        renderCart();
+                        showAlert('Gagal', (res && res.message) || 'Transaksi tidak dapat disimpan.', 'error');
+                    }
+                });
             });
         }
 
@@ -7286,79 +7935,83 @@ const sorted = [...data].sort((a, b) => {
 });
 // ===============================================
 
-let currentGroup = '', groupId = 0;
+            let currentGroup = '', groupId = 0;
 
-            // BOOSTER: DocumentFragment untuk batch DOM insert
-            const frag = document.createDocumentFragment();
+            // [PERF] SATU STRING, SATU KALI PARSE.
+            // Versi lama membuat <tr> lewat createElement lalu mengisi
+            // tr.innerHTML SATU PER SATU. Artinya parser HTML browser dipanggil
+            // ulang untuk SETIAP baris — 800 baris berarti 800 kali parse,
+            // masing-masing dengan biaya tetapnya sendiri. Sekarang seluruh
+            // tabel dirakit sebagai teks lalu diserahkan SEKALI. Susunan DOM
+            // yang dihasilkan identik, hanya parser-nya yang berhenti bekerja
+            // berulang-ulang.
+            //
+            // [AKURASI] Semua nilai dari data kini dilewatkan _escHtml (isi sel)
+            // atau _escJsAttr (nilai di dalam onclick). Nama item yang
+            // mengandung & < > atau kutip sekarang tampil apa adanya, bukan
+            // merusak susunan kolom seperti sebelumnya.
+            const buf = [];
 
             sorted.forEach(row => {
                 const grp = row.tanggalGroup || 'Tanpa Tanggal';
                 if (grp !== currentGroup) {
                     currentGroup = grp; groupId++;
-                    const gtr = document.createElement('tr');
-                    gtr.className = 'group-hdr';
-                    gtr.innerHTML = `<td colspan="${cols}"><div class="group-hdr-inner" onclick="toggleGroup('grp-${type}-${groupId}','icon-${type}-${groupId}')">
-                        <span style="font-size:0.825rem; font-weight:800; color:var(--accent); display:flex; align-items:center; gap:8px;">
-                            <i class="ph ph-calendar-blank" style="font-size:1.15rem;"></i> ${grp}
-                        </span>
-                        <i id="icon-${type}-${groupId}" class="ph ph-caret-down" style="color:var(--text-dim); font-size:1.1rem; transition:transform 0.25s;"></i>
-                    </div></td>`;
-                    frag.appendChild(gtr);
+                    buf.push('<tr class="group-hdr"><td colspan="' + cols + '">' +
+                        '<div class="group-hdr-inner" onclick="toggleGroup(\'grp-' + type + '-' + groupId + '\',\'icon-' + type + '-' + groupId + '\')">' +
+                        '<span style="font-size:0.825rem; font-weight:800; color:var(--accent); display:flex; align-items:center; gap:8px;">' +
+                        '<i class="ph ph-calendar-blank" style="font-size:1.15rem;"></i> ' + _escHtml(grp) + '</span>' +
+                        '<i id="icon-' + type + '-' + groupId + '" class="ph ph-caret-down" style="color:var(--text-dim); font-size:1.1rem; transition:transform 0.25s;"></i>' +
+                        '</div></td></tr>');
                 }
 
-                const tr = document.createElement('tr');
-                tr.className = `grp-${type}-${groupId} hidden`;
+                const rowCls = 'grp-' + type + '-' + groupId + ' hidden';
 
                 if (isIn) {
                     const rawExp     = row.expDate || '';
                     const expDateVal = rawExp ? formatExpDate(rawExp) : '—';
                     const expStyle   = rawExp ? getExpDateStyle(rawExp) : '';
-                    const idSafe     = (row.id || '').replace(/'/g, "\\'");
-                    const tglSafe    = (row.tanggalEdit || '').replace(/'/g, "\\'");
-                    const nodoSafe   = (row.noDo || '').replace(/'/g, "\\'").replace(/\\/g, "\\\\");
-                    const altuomSafe = (row.altUom || '').replace(/'/g, "\\'");
+                    const idSafe     = _escJsAttr(row.id || '');
+                    const tglSafe    = _escJsAttr(row.tanggalEdit || '');
+                    const nodoSafe   = _escJsAttr(row.noDo || '');
+                    const altuomSafe = _escJsAttr(row.altUom || '');
+                    const expSafe    = _escJsAttr(rawExp);
                     const delBtnIn = (currentUser && currentUser.role === 'ADMIN')
-                        ? `<button onclick="deleteInboundRow('${idSafe}')" style="background:var(--red-soft); border:1px solid rgba(220,38,38,0.25); color:var(--red); border-radius:8px; padding:6px 9px; cursor:pointer;"><i class="ph ph-trash" style="font-size:1.05rem;"></i></button>`
+                        ? '<button onclick="deleteInboundRow(\'' + idSafe + '\')" style="background:var(--red-soft); border:1px solid rgba(220,38,38,0.25); color:var(--red); border-radius:8px; padding:6px 9px; cursor:pointer;"><i class="ph ph-trash" style="font-size:1.05rem;"></i></button>'
                         : '';
-                    const actionTd   = `<td style="text-align:center;">
-                        <div style="display:inline-flex; gap:6px;">
-                        <button onclick="editInboundItem('${idSafe}','${tglSafe}','${nodoSafe}','${parseFloat(row.qty||0).toFixed(2)}','${altuomSafe}','${rawExp}')"
-                            style="background:var(--accent-soft); border:1px solid var(--accent-brd); color:var(--accent); border-radius:8px; padding:6px 9px; cursor:pointer;">
-                            <i class="ph ph-pencil-simple" style="font-size:1.05rem;"></i>
-                        </button>${delBtnIn}
-                        </div>
-                    </td>`;
-                    tr.innerHTML = `
-                        <td style="color:var(--text-muted); font-size:0.8rem; font-weight:500;">${row.tanggal || '—'}</td>
-                        <td class="mono">${row.noDo || '—'}</td>
-                        <td style="font-weight:700; color:var(--text);">${stripCode(row.namaItem)}</td>
-                        <td style="color:var(--text-muted); font-size:0.8rem;">${row.altUom || '—'}</td>
-                        <td><span style="${expStyle}">${expDateVal}</span></td>
-                        <td style="text-align:right; font-weight:800; color:var(--green); font-size:0.9rem;">+${formatID(row.qty)}</td>
-                        <td style="color:var(--text-muted); font-size:0.8rem;">${row.uom || '—'}</td>
-                        ${actionTd}`;
+                    const actionTd = '<td style="text-align:center;"><div style="display:inline-flex; gap:6px;">' +
+                        '<button onclick="editInboundItem(\'' + idSafe + '\',\'' + tglSafe + '\',\'' + nodoSafe + '\',\'' + parseFloat(row.qty || 0).toFixed(2) + '\',\'' + altuomSafe + '\',\'' + expSafe + '\')"' +
+                        ' style="background:var(--accent-soft); border:1px solid var(--accent-brd); color:var(--accent); border-radius:8px; padding:6px 9px; cursor:pointer;">' +
+                        '<i class="ph ph-pencil-simple" style="font-size:1.05rem;"></i></button>' + delBtnIn + '</div></td>';
+                    buf.push('<tr class="' + rowCls + '">' +
+                        '<td style="color:var(--text-muted); font-size:0.8rem; font-weight:500;">' + _escHtml(row.tanggal || '—') + '</td>' +
+                        '<td class="mono">' + _escHtml(row.noDo || '—') + '</td>' +
+                        '<td style="font-weight:700; color:var(--text);">' + _escHtml(stripCode(row.namaItem)) + '</td>' +
+                        '<td style="color:var(--text-muted); font-size:0.8rem;">' + _escHtml(row.altUom || '—') + '</td>' +
+                        '<td><span style="' + expStyle + '">' + _escHtml(expDateVal) + '</span></td>' +
+                        '<td style="text-align:right; font-weight:800; color:var(--green); font-size:0.9rem;">+' + formatID(row.qty) + '</td>' +
+                        '<td style="color:var(--text-muted); font-size:0.8rem;">' + _escHtml(row.uom || '—') + '</td>' +
+                        actionTd + '</tr>');
                 } else {
                     // Outbound — tidak filter status (sesuai permintaan)
-                    const idSafe   = (row.id || '').replace(/'/g, "\\'");
+                    const idSafe = _escJsAttr(row.id || '');
                     const delBtnOut = (currentUser && currentUser.role === 'ADMIN')
-                        ? `<button onclick="deleteOutboundRow('${idSafe}')" style="background:var(--red-soft); border:1px solid rgba(220,38,38,0.25); color:var(--red); border-radius:8px; padding:6px 9px; cursor:pointer;"><i class="ph ph-trash" style="font-size:1.05rem;"></i></button>`
+                        ? '<button onclick="deleteOutboundRow(\'' + idSafe + '\')" style="background:var(--red-soft); border:1px solid rgba(220,38,38,0.25); color:var(--red); border-radius:8px; padding:6px 9px; cursor:pointer;"><i class="ph ph-trash" style="font-size:1.05rem;"></i></button>'
                         : '';
-                    const actionTd = `<td style="text-align:center;"><div style="display:inline-flex; gap:6px;"><button onclick="editOutboundItem('${idSafe}','${row.tanggalEdit||''}','${parseFloat(row.qty||0).toFixed(2)}')"
-                        style="background:var(--accent-soft); border:1px solid var(--accent-brd); color:var(--accent); border-radius:8px; padding:6px 9px; cursor:pointer;">
-                        <i class="ph ph-pencil-simple" style="font-size:1.05rem;"></i></button>${delBtnOut}</div></td>`;
-                    tr.innerHTML = `
-                        <td style="color:var(--text-muted); font-size:0.8rem; font-weight:500;">${row.tanggal || '—'}</td>
-                        <td style="font-weight:700; color:var(--text);">${stripCode(row.namaItem)}</td>
-                        <td style="color:var(--text-muted); font-size:0.8rem;">${row.noSpb || row.altUom || '—'}</td>
-                        <td style="text-align:right; font-weight:800; color:var(--red); font-size:0.9rem;">-${formatID(row.qty)}</td>
-                        ${actionTd}`;
+                    const actionTd = '<td style="text-align:center;"><div style="display:inline-flex; gap:6px;">' +
+                        '<button onclick="editOutboundItem(\'' + idSafe + '\',\'' + _escJsAttr(row.tanggalEdit || '') + '\',\'' + parseFloat(row.qty || 0).toFixed(2) + '\')"' +
+                        ' style="background:var(--accent-soft); border:1px solid var(--accent-brd); color:var(--accent); border-radius:8px; padding:6px 9px; cursor:pointer;">' +
+                        '<i class="ph ph-pencil-simple" style="font-size:1.05rem;"></i></button>' + delBtnOut + '</div></td>';
+                    buf.push('<tr class="' + rowCls + '">' +
+                        '<td style="color:var(--text-muted); font-size:0.8rem; font-weight:500;">' + _escHtml(row.tanggal || '—') + '</td>' +
+                        '<td style="font-weight:700; color:var(--text);">' + _escHtml(stripCode(row.namaItem)) + '</td>' +
+                        '<td style="color:var(--text-muted); font-size:0.8rem;">' + _escHtml(row.noSpb || row.altUom || '—') + '</td>' +
+                        '<td style="text-align:right; font-weight:800; color:var(--red); font-size:0.9rem;">-' + formatID(row.qty) + '</td>' +
+                        actionTd + '</tr>');
                 }
-                frag.appendChild(tr);
             });
 
-            // BOOSTER: satu kali innerHTML clear + satu kali append
-            tbody.innerHTML = '';
-            tbody.appendChild(frag);
+            // Satu kali serah terima ke DOM.
+            tbody.innerHTML = buf.join('');
         }
 
         // ===================== DATA MASUK =====================
@@ -7765,11 +8418,27 @@ let currentGroup = '', groupId = 0;
                 background: 'var(--surface)', color: 'var(--text)'
             }).then(result => {
                 if (!result.isConfirmed) return;
-                showLoader(true);
-                google.script.run
-                    .withSuccessHandler(res => {
-                        showLoader(false);
-                        if (res.success) {
+
+                // [DURABILITY] Sama seperti Barang Keluar: catat ke antrean dulu,
+                // bebaskan layar, kirim di latar belakang. Penjagaan duplikat
+                // bawaan backend (tanggal + item + qty) TIDAK diubah sedikit pun —
+                // clientTxnId adalah lapisan TAMBAHAN yang menangani hal berbeda:
+                // pengiriman ulang atas transaksi yang SAMA, bukan dua transaksi
+                // berbeda yang kebetulan isinya mirip.
+                const isiKeranjang = inCartItems.slice();
+                const noDoDipakai  = noDo;
+
+                inCartItems = [];
+                renderInCart();
+                document.getElementById('in-nodo').value = '';
+                closeInboundModal();
+                _syncBarShow('<i class="ph ph-circle-notch spin-ico"></i><span>Menyimpan ' +
+                    isiKeranjang.length + ' item barang masuk (DO: ' + _escHtml(noDoDipakai) + ')…</span>', 'sync', 0);
+
+                SIGAPQueue.enqueue('saveInboundData', { tanggal, noDo: noDoDipakai, items: isiKeranjang }, {
+                    label: 'Barang Masuk',
+                    onDone: res => {
+                        if (res && res.success) {
                             Swal.fire({ title: 'Tersimpan!', text: res.message, icon: res.skipped ? 'info' : 'success', background: 'var(--surface)', color: 'var(--text)', confirmButtonColor: 'var(--accent)' });
                             // BOOSTER: langsung tempel baris tersimpan ke data lokal — tanpa refetch
                             if (res.saved && res.saved.length && globalInboundData.length) {
@@ -7778,16 +8447,18 @@ let currentGroup = '', groupId = 0;
                             } else if (res.saved && res.saved.length) {
                                 loadInboundData(); // tabel belum pernah dimuat → muat normal
                             }
-                            inCartItems = [];
-                            renderInCart();
-                            document.getElementById('in-nodo').value = '';
-                            closeInboundModal();
                             globalStockData = [];
                             loadStockDataSilent();
-                        } else showAlert('Gagal', res.message, 'error');
-                    })
-                    .withFailureHandler(() => { showLoader(false); showAlert('Error', 'Koneksi Server Gagal', 'error'); })
-                    .saveInboundData({ tanggal, noDo, items: inCartItems });
+                        } else showAlert('Gagal', (res && res.message) || 'Gagal menyimpan.', 'error');
+                    },
+                    onFail: res => {
+                        inCartItems = isiKeranjang.slice();
+                        renderInCart();
+                        const el = document.getElementById('in-nodo');
+                        if (el) el.value = noDoDipakai;
+                        showAlert('Gagal', (res && res.message) || 'Transaksi tidak dapat disimpan.', 'error');
+                    }
+                });
             });
         }
 
@@ -8031,15 +8702,15 @@ let currentGroup = '', groupId = 0;
                 return currentStockSort.direction === 'asc' ? valA - valB : valB - valA;
             });
 
-            const frag = document.createDocumentFragment();
+            // [PERF] Satu string, satu kali serah ke DOM (lihat _stockRowHtml).
+            const buf = [];
 
             // Mode FLAT (Jika filter kategori aktif selain ALL)
             if (activeKatFilter !== 'ALL') {
                 filtered.forEach(row => {
-                    frag.appendChild(_buildStockRow(row, false));
+                    buf.push(_stockRowHtml(row, false));
                 });
-                tbody.innerHTML = '';
-                tbody.appendChild(frag);
+                tbody.innerHTML = buf.join('');
                 return;
             }
 
@@ -8061,81 +8732,82 @@ let currentGroup = '', groupId = 0;
                 const items = grouped[kat];
                 const total = items.reduce((s, r) => s + (parseFloat(r.sisa) || 0), 0);
 
-                const hdrTr = document.createElement('tr');
-                hdrTr.className = 'kategori-hdr';
-                hdrTr.innerHTML = `<td colspan="9">
-                    <div class="kategori-hdr-inner ${cfg.cls}" onclick="toggleGroup('katgrp-${katGroupId}','kicon-${katGroupId}')">
-                        <span style="display:flex; align-items:center; gap:10px;">
-                            <span class="badge ${cfg.badge}" style="padding:5px 14px; font-size:0.78rem;">
-                                <i class="ph ${cfg.icon}" style="margin-right:5px; font-size:1rem;"></i>${cfg.label}
-                            </span>
-                            <span style="font-size:0.8rem; font-weight:700; color:${cfg.color};">${items.length} item</span>
-                        </span>
-                        <div style="display:flex; align-items:center; gap:16px;">
-                            <span style="font-size:0.75rem; font-weight:600; color:var(--text-muted);">
-                                Sisa Total: <span style="color:${cfg.color}; font-size:0.875rem; font-weight:800;">${formatID(total)}</span>
-                            </span>
-                            <i id="kicon-${katGroupId}" class="ph ph-caret-down" style="color:var(--text-dim); font-size:1.1rem; transition:transform 0.25s;"></i>
-                        </div>
-                    </div>
-                </td>`;
-                frag.appendChild(hdrTr);
+                buf.push('<tr class="kategori-hdr"><td colspan="9">' +
+                    '<div class="kategori-hdr-inner ' + cfg.cls + '" onclick="toggleGroup(\'katgrp-' + katGroupId + '\',\'kicon-' + katGroupId + '\')">' +
+                        '<span style="display:flex; align-items:center; gap:10px;">' +
+                            '<span class="badge ' + cfg.badge + '" style="padding:5px 14px; font-size:0.78rem;">' +
+                                '<i class="ph ' + cfg.icon + '" style="margin-right:5px; font-size:1rem;"></i>' + cfg.label +
+                            '</span>' +
+                            '<span style="font-size:0.8rem; font-weight:700; color:' + cfg.color + ';">' + items.length + ' item</span>' +
+                        '</span>' +
+                        '<div style="display:flex; align-items:center; gap:16px;">' +
+                            '<span style="font-size:0.75rem; font-weight:600; color:var(--text-muted);">' +
+                                'Sisa Total: <span style="color:' + cfg.color + '; font-size:0.875rem; font-weight:800;">' + formatID(total) + '</span>' +
+                            '</span>' +
+                            '<i id="kicon-' + katGroupId + '" class="ph ph-caret-down" style="color:var(--text-dim); font-size:1.1rem; transition:transform 0.25s;"></i>' +
+                        '</div>' +
+                    '</div>' +
+                '</td></tr>');
 
                 items.forEach(row => {
-                    frag.appendChild(_buildStockRow(row, true, katGroupId));
+                    buf.push(_stockRowHtml(row, true, katGroupId));
                 });
             });
 
-            tbody.innerHTML = '';
-            tbody.appendChild(frag);
+            tbody.innerHTML = buf.join('');
         }
 
         // BOOSTER: helper pembangun baris stock (menghindari duplikasi kode)
-        function _buildStockRow(row, grouped, katGroupId) {
+        // [PERF] Dulu fungsi ini membuat elemen <tr> lalu mengisi tr.innerHTML —
+        // satu panggilan parser HTML PER BARIS. Sekarang ia mengembalikan
+        // potongan teks saja, dan seluruh tabel diserahkan ke DOM sekali jalan
+        // oleh renderFilteredStock(). Kolom, gaya, dan perilaku tombol identik.
+        //
+        // [AKURASI] nameSafe dulu memakai .replace(/'/g,"\\'") saja, sehingga
+        // nama ber-KUTIP DUA menutup atribut onclick lebih awal dan tombol
+        // Log/Riwayat/foto mati untuk item tersebut. _escJsAttr menutup kedua
+        // lapisan (JavaScript lalu HTML) sekaligus.
+        function _stockRowHtml(row, grouped, katGroupId) {
             const sisa   = parseFloat(row.sisa)  || 0;
             const masuk  = parseFloat(row.masuk) || 0;
             const keluar = parseFloat(row.keluar)|| 0;
             const awal   = parseFloat(row.awal)  || 0;
             const avgOut = parseFloat(row.avgOut) || 0;
-            const nameSafe = (row.namaItem||'').replace(/'/g,"\\'");
+            const nameSafe = _escJsAttr(row.namaItem || '');
             const alertChip = row.alert
-                ? `<div style="margin-top:3px;"><span class="badge" style="background:var(--red-soft); color:var(--red); border:1px solid rgba(220,38,38,0.3); font-size:0.6rem;"><i class="ph ph-warning" style="margin-right:3px;"></i>STOK RENDAH</span></div>`
+                ? '<div style="margin-top:3px;"><span class="badge" style="background:var(--red-soft); color:var(--red); border:1px solid rgba(220,38,38,0.3); font-size:0.6rem;"><i class="ph ph-warning" style="margin-right:3px;"></i>STOK RENDAH</span></div>'
                 : '';
-            const tr = document.createElement('tr');
-            if (grouped) tr.className = `katgrp-${katGroupId}`;
-            if (row.alert) tr.style.background = 'rgba(220,38,38,0.035)';
             // [UPGRADE] Foto item — TAMPILAN SAJA. Klik hanya membuka pratinjau;
             // tidak ada unggah/ganti/hapus dari Kartu Stock.
             const img = _imageOf(row.namaItem);
             const thumbHtml = img
-                ? `<button class="item-thumb" onclick="openImagePreview('${nameSafe}', true)" title="Lihat foto item">
-                       <img src="${_thumbUrl(img, 160)}" alt="" loading="lazy"
-                            onerror="this.parentElement.classList.add('thumb-broken'); this.remove();">
-                   </button>`
-                : `<span class="item-thumb empty ro" title="Belum ada foto"><i class="ph ph-image"></i></span>`;
+                ? '<button class="item-thumb" onclick="openImagePreview(\'' + nameSafe + '\', true)" title="Lihat foto item">' +
+                  '<img src="' + _escHtml(_thumbUrl(img, 160)) + '" alt="" loading="lazy"' +
+                  ' onerror="this.parentElement.classList.add(\'thumb-broken\'); this.remove();"></button>'
+                : '<span class="item-thumb empty ro" title="Belum ada foto"><i class="ph ph-image"></i></span>';
 
-            tr.innerHTML = `
-                <td style="width:76px;${grouped?' padding-left:24px;':''}">${thumbHtml}</td>
-                <td style="font-weight:700; color:var(--text);">${stripCode(row.namaItem)}${alertChip}</td>
-                <td style="text-align:center; color:var(--amber); font-weight:700;">${formatID(awal)}</td>
-                <td style="text-align:center; color:var(--green); font-weight:700;">${formatID(masuk)}</td>
-                <td style="text-align:center; color:var(--red); font-weight:700;">${formatID(keluar)}</td>
-                <td style="text-align:center;" class="${sisa < 0 ? 'sisa-neg' : 'sisa-pos'}">${formatID(sisa)}</td>
-                <td style="text-align:center; font-weight:700; color:${row.alert ? 'var(--red)' : 'var(--text-muted)'};" class="display-num" title="Forecast rata-rata keluar per bulan">${avgOut > 0 ? avgOut : '—'}</td>
-                <td style="color:var(--text-muted); font-size:0.8rem;">${row.uom || '—'}</td>
-                <td style="text-align:center;">
-                    <div style="display:inline-flex; gap:5px;">
-                        <button onclick="showStockDetail('${nameSafe}')"
-                            style="background:var(--accent-soft); border:1px solid var(--accent-brd); color:var(--accent); border-radius:8px; padding:5px 10px; cursor:pointer; font-size:0.75rem; font-family:var(--font-body); display:inline-flex; align-items:center; gap:4px; font-weight:700;">
-                            <i class="ph ph-eye" style="font-size:0.9rem;"></i> Log
-                        </button>
-                        <button onclick="showRiwayat('${nameSafe}')" title="Riwayat aktivitas IN & OUT + summary"
-                            style="background:var(--blue-soft); border:1px solid rgba(2,132,199,0.25); color:var(--blue); border-radius:8px; padding:5px 10px; cursor:pointer; font-size:0.75rem; font-family:var(--font-body); display:inline-flex; align-items:center; gap:4px; font-weight:700;">
-                            <i class="ph ph-clock-counter-clockwise" style="font-size:0.9rem;"></i> Riwayat
-                        </button>
-                    </div>
-                </td>`;
-            return tr;
+            const trAttr = (grouped ? ' class="katgrp-' + katGroupId + '"' : '') +
+                           (row.alert ? ' style="background:rgba(220,38,38,0.035);"' : '');
+
+            return '<tr' + trAttr + '>' +
+                '<td style="width:76px;' + (grouped ? ' padding-left:24px;' : '') + '">' + thumbHtml + '</td>' +
+                '<td style="font-weight:700; color:var(--text);">' + _escHtml(stripCode(row.namaItem)) + alertChip + '</td>' +
+                '<td style="text-align:center; color:var(--amber); font-weight:700;">' + formatID(awal) + '</td>' +
+                '<td style="text-align:center; color:var(--green); font-weight:700;">' + formatID(masuk) + '</td>' +
+                '<td style="text-align:center; color:var(--red); font-weight:700;">' + formatID(keluar) + '</td>' +
+                '<td style="text-align:center;" class="' + (sisa < 0 ? 'sisa-neg' : 'sisa-pos') + '">' + formatID(sisa) + '</td>' +
+                '<td style="text-align:center; font-weight:700; color:' + (row.alert ? 'var(--red)' : 'var(--text-muted)') + ';" class="display-num" title="Forecast rata-rata keluar per bulan">' + (avgOut > 0 ? avgOut : '—') + '</td>' +
+                '<td style="color:var(--text-muted); font-size:0.8rem;">' + _escHtml(row.uom || '—') + '</td>' +
+                '<td style="text-align:center;">' +
+                    '<div style="display:inline-flex; gap:5px;">' +
+                        '<button onclick="showStockDetail(\'' + nameSafe + '\')"' +
+                        ' style="background:var(--accent-soft); border:1px solid var(--accent-brd); color:var(--accent); border-radius:8px; padding:5px 10px; cursor:pointer; font-size:0.75rem; font-family:var(--font-body); display:inline-flex; align-items:center; gap:4px; font-weight:700;">' +
+                        '<i class="ph ph-eye" style="font-size:0.9rem;"></i> Log</button>' +
+                        '<button onclick="showRiwayat(\'' + nameSafe + '\')" title="Riwayat aktivitas IN & OUT + summary"' +
+                        ' style="background:var(--blue-soft); border:1px solid rgba(2,132,199,0.25); color:var(--blue); border-radius:8px; padding:5px 10px; cursor:pointer; font-size:0.75rem; font-family:var(--font-body); display:inline-flex; align-items:center; gap:4px; font-weight:700;">' +
+                        '<i class="ph ph-clock-counter-clockwise" style="font-size:0.9rem;"></i> Riwayat</button>' +
+                    '</div>' +
+                '</td></tr>';
         }
 
         // ===================== MODAL DETAIL LOG =====================
@@ -11029,11 +11701,37 @@ let currentGroup = '', groupId = 0;
                 customClass: { popup: 'swal-opn-confirm' }
             }).then(result => {
                 if (!result.isConfirmed) return;
-                showLoader(true);
-                google.script.run
-                    .withSuccessHandler(res => {
-                        showLoader(false);
-                        if (res.success) {
+
+                // =========================================================
+                // [DURABILITY] STOCK OPNAME — PROSES PALING SENSITIF
+                // ---------------------------------------------------------
+                // Satu baris opname ganda berarti satu ADJUSTMENT STOK ganda di
+                // Sheet IN atau OUT. Di versi lama, satu kali waktu habis pada
+                // opname 100 item meninggalkan user tanpa cara mengetahui apakah
+                // datanya masuk — dan mengirim ulang adalah tebakan yang berisiko
+                // menggandakan seluruh adjustment.
+                //
+                // Sekarang: tercatat dulu, lalu dikirim. Kalau waktu habis,
+                // antrean MEMERIKSA lewat verifyTransaction sebelum memutuskan,
+                // jadi tidak ada lagi pengiriman ulang yang membabi buta.
+                //
+                // Rumus selisih, jenis adjustment, referensi, dan seluruh
+                // penulisan ke Sheet IN/OUT TIDAK diubah sama sekali — semuanya
+                // tetap dikerjakan backend dengan kode yang sama.
+                //
+                // Draft lokal SENGAJA belum dibersihkan di sini. Draft adalah
+                // jaring pengaman terakhir; ia baru dibuang setelah server
+                // memastikan opname benar-benar tersimpan.
+                // =========================================================
+                const barisOpname = opnameRows.slice();
+
+                _syncBarShow('<i class="ph ph-circle-notch spin-ico"></i><span>Menyimpan Stock Opname ' +
+                    items.length + ' item…</span>', 'sync', 0);
+
+                SIGAPQueue.enqueue('saveOpnameData', _withAuth({ tanggal, periode, items }), {
+                    label: 'Stock Opname',
+                    onDone: res => {
+                        if (res && res.success) {
                             Swal.fire({ title: 'Opname Tersimpan!', text: res.message, icon: 'success', background: 'var(--surface)', color: 'var(--text)', confirmButtonColor: 'var(--accent)' });
                             opnameRows = [];
                             // Draft final → sudah menjadi Laporan Opname, bersihkan draft lokal.
@@ -11045,10 +11743,16 @@ let currentGroup = '', groupId = 0;
                             // Invalidate cache agar data lain ikut ter-refresh
                             globalStockData = []; globalInboundData = []; globalOutboundData = []; globalOpnameReport = [];
                             loadStockDataSilent();
-                        } else showAlert('Gagal', res.message, 'error');
-                    })
-                    .withFailureHandler(() => { showLoader(false); showAlert('Error', 'Koneksi Server Gagal', 'error'); })
-                    .saveOpnameData(_withAuth({ tanggal, periode, items }));
+                        } else showAlert('Gagal', (res && res.message) || 'Gagal menyimpan opname.', 'error');
+                    },
+                    onFail: res => {
+                        // Baris opname dikembalikan utuh — hitungan fisik yang
+                        // sudah dikerjakan di gudang tidak boleh hilang hanya
+                        // karena server menolak satu kali.
+                        if (!opnameRows.length) { opnameRows = barisOpname.slice(); renderOpnameTable(); updateOpnameSummary(); }
+                        showAlert('Gagal', (res && res.message) || 'Opname tidak dapat disimpan. Data hitung fisik Anda masih tersimpan.', 'error');
+                    }
+                });
             });
         }
 
@@ -14576,6 +15280,279 @@ let currentGroup = '', groupId = 0;
             }
         };
 
+        // =====================================================================
+        // [PERF] SIGAPCache — FOTO DATA TERAKHIR (stale-while-revalidate)
+        // ---------------------------------------------------------------------
+        // MASALAH YANG DIPECAHKAN
+        // Sebelum ini, membuka aplikasi SELALU berarti menatap layar kosong
+        // selama 5-12 detik: satu permintaan checkSession (2-4 detik) lalu
+        // MENUNGGUNYA SELESAI sebelum getBootstrapData (2-8 detik) dikirim.
+        // Padahal 99% isi layar itu SAMA PERSIS dengan yang dilihat user lima
+        // menit sebelumnya.
+        //
+        // CARA KERJA
+        // Hasil getBootstrapData yang berhasil disimpan sebagai satu "foto" di
+        // localStorage. Saat aplikasi dibuka lagi, foto itu dipasang LEBIH DULU
+        // supaya layar langsung terisi, sementara permintaan ke server tetap
+        // berjalan di latar belakang dan menimpanya begitu data asli tiba.
+        //
+        // ATURAN KESELAMATAN DATA (ini sistem stok — angka salah itu mahal)
+        //   1. Foto TIDAK PERNAH menggantikan permintaan ke server. Permintaan
+        //      selalu tetap dikirim; foto hanya mengisi layar selama menunggu.
+        //   2. Selama yang tampil masih foto, ada penanda JELAS di layar bahwa
+        //      angkanya belum tentu terbaru. Penanda hilang saat data asli tiba.
+        //   3. Setiap kali user MENULIS (simpan keluar/masuk/opname/master/…),
+        //      foto langsung dibuang — supaya tidak mungkin ada layar yang
+        //      menampilkan angka sebelum transaksi user sendiri.
+        //   4. Foto disimpan PER USER dan dibuang saat logout, jadi data satu
+        //      user tidak pernah terlihat oleh user lain di perangkat yang sama.
+        //   5. Foto yang lebih tua dari MAX_AGE diabaikan total.
+        //   6. Semua keputusan tulis tetap divalidasi server — foto ini murni
+        //      untuk TAMPILAN. Tidak ada satu pun aturan bisnis yang berubah.
+        // =====================================================================
+        const SIGAPCache = (function () {
+            // Versi dinaikkan bila BENTUK data berubah, agar foto lama yang
+            // bentuknya tidak cocok tidak pernah dipakai.
+            const VERSION  = 'v1';
+            const PREFIX   = 'SIGAP_SNAP_';
+            const MAX_AGE  = 6 * 60 * 60 * 1000;   // 6 jam
+            // localStorage umumnya dibatasi ~5 MB per origin. Foto yang lebih
+            // besar dari ini tidak disimpan — lebih baik tanpa foto daripada
+            // memenuhi kuota dan membuat penyimpanan token ikut gagal.
+            const MAX_BYTES = 2 * 1024 * 1024;
+
+            function _key(user) { return PREFIX + VERSION + '_' + (user || 'anon'); }
+
+            /** Buang SEMUA foto milik siapa pun (dipakai saat logout & saat kuota penuh). */
+            function clearAll() {
+                try {
+                    const buang = [];
+                    for (let i = 0; i < localStorage.length; i++) {
+                        const k = localStorage.key(i);
+                        if (k && k.indexOf(PREFIX) === 0) buang.push(k);
+                    }
+                    buang.forEach(function (k) { try { localStorage.removeItem(k); } catch (e) {} });
+                } catch (e) {}
+            }
+
+            function clear(user) {
+                if (user == null) return clearAll();
+                try { localStorage.removeItem(_key(user)); } catch (e) {}
+            }
+
+            function save(user, data) {
+                if (!user || !data) return false;
+                let teks;
+                try { teks = JSON.stringify({ ts: Date.now(), data: data }); }
+                catch (e) { return false; }                 // struktur melingkar — abaikan saja
+                if (teks.length > MAX_BYTES) return false;
+                try { localStorage.setItem(_key(user), teks); return true; }
+                catch (e) {
+                    // Kuota penuh: bersihkan foto lama lalu coba SEKALI lagi.
+                    clearAll();
+                    try { localStorage.setItem(_key(user), teks); return true; }
+                    catch (e2) { return false; }
+                }
+            }
+
+            /** Kembalikan { data, ts, ageMs } atau null bila tidak ada/kedaluwarsa. */
+            function load(user) {
+                if (!user) return null;
+                let teks = null;
+                try { teks = localStorage.getItem(_key(user)); } catch (e) { return null; }
+                if (!teks) return null;
+                let obj = null;
+                try { obj = JSON.parse(teks); } catch (e) { clear(user); return null; }
+                if (!obj || !obj.data || !obj.ts) { clear(user); return null; }
+                const ageMs = Date.now() - obj.ts;
+                if (ageMs < 0 || ageMs > MAX_AGE) { clear(user); return null; }
+                return { data: obj.data, ts: obj.ts, ageMs: ageMs };
+            }
+
+            return { save: save, load: load, clear: clear, clearAll: clearAll, MAX_AGE: MAX_AGE };
+        })();
+
+        // ---------------------------------------------------------------------
+        // Penanda "data ini foto lama" — satu baris tipis di bawah header.
+        // Sengaja dibuat mencolok tapi tidak menghalangi: user tetap bisa bekerja,
+        // hanya diberi tahu bahwa angkanya sedang disegarkan.
+        // ---------------------------------------------------------------------
+        let _snapshotAktif = false;
+
+        function _umurManusiawi(ms) {
+            const menit = Math.floor(ms / 60000);
+            if (menit < 1)  return 'baru saja';
+            if (menit < 60) return menit + ' menit lalu';
+            const jam = Math.floor(menit / 60);
+            return jam + ' jam lalu';
+        }
+
+        function _tampilkanPenandaSnapshot(ageMs, gagalJaringan) {
+            let el = document.getElementById('snapshot-bar');
+            if (!el) {
+                el = document.createElement('div');
+                el.id = 'snapshot-bar';
+                el.className = 'snapshot-bar';
+                document.body.appendChild(el);
+            }
+            el.innerHTML = gagalJaringan
+                ? '<i class="ph ph-warning-circle"></i><span>Gagal menghubungi server. Yang tampil adalah data tersimpan (' +
+                  _umurManusiawi(ageMs) + '). <b>Jangan dipakai sebagai acuan stok.</b></span>' +
+                  '<button type="button" onclick="location.reload()">Coba Lagi</button>'
+                : '<i class="ph ph-clock-counter-clockwise"></i><span>Menampilkan data tersimpan (' +
+                  _umurManusiawi(ageMs) + ') — sedang menyegarkan…</span>';
+            el.classList.toggle('is-error', !!gagalJaringan);
+            el.classList.add('show');
+            // Dipakai CSS agar penanda sinkronisasi naik di atas penanda ini
+            // pada layar sempit — keduanya tidak pernah saling menutupi.
+            try { document.body.classList.add('has-snapshot-bar'); } catch (e) {}
+            _snapshotAktif = true;
+        }
+
+        function _sembunyikanPenandaSnapshot() {
+            const el = document.getElementById('snapshot-bar');
+            if (el) el.classList.remove('show');
+            try { document.body.classList.remove('has-snapshot-bar'); } catch (e) {}
+            _snapshotAktif = false;
+        }
+
+        // =====================================================================
+        // [DURABILITY] PENANDA SINKRONISASI — PENGGANTI LOADER PENUH LAYAR
+        // ---------------------------------------------------------------------
+        // Sebelumnya menyimpan transaksi berarti layar TERKUNCI sampai server
+        // menjawab: 2-8 detik user tidak bisa melakukan apa pun, termasuk
+        // menyiapkan transaksi berikutnya.
+        //
+        // Sekarang statusnya ditampilkan sebagai penanda kecil di bawah layar —
+        // memakai kerangka yang sama persis dengan penanda "data tersimpan" yang
+        // sudah ada — dan user bisa terus bekerja. Yang berubah hanya CARA
+        // MENUNGGUNYA; syarat tersimpannya data di server tidak berubah
+        // sedikit pun.
+        //
+        // Penanda hanya muncul kalau memang ada yang perlu diberitahukan. Antrean
+        // yang langsung berhasil (keadaan normal) memunculkan "Tersimpan" sebentar
+        // lalu menghilang sendiri.
+        // =====================================================================
+        let _syncBarTimer = null;
+
+        /**
+         * Dipanggil dari tombol "Coba Lagi" pada penanda sinkronisasi.
+         * Sengaja berupa function declaration, sama seperti seluruh handler
+         * onclick lain di berkas ini: deklarasi fungsi di tingkat atas skrip
+         * otomatis tersedia sebagai properti global, sehingga atribut onclick
+         * pasti bisa menemukannya.
+         */
+        function retrySyncTransaksi() {
+            try { SIGAPQueue.retryFailed(); } catch (e) {}
+        }
+
+        function _syncBarEl() {
+            let el = document.getElementById('sync-bar');
+            if (!el) {
+                el = document.createElement('div');
+                el.id = 'sync-bar';
+                el.className = 'sync-bar';
+                document.body.appendChild(el);
+            }
+            return el;
+        }
+
+        /**
+         * Tampilkan satu pesan status singkat.
+         *   nada: 'sync' | 'ok' | 'warn' | 'error'
+         *   ms  : sembunyikan otomatis setelah sekian milidetik (0 = tetap tampil)
+         */
+        function _syncBarShow(html, nada, ms) {
+            const el = _syncBarEl();
+            el.classList.remove('is-ok', 'is-warn', 'is-error');
+            if (nada === 'ok')    el.classList.add('is-ok');
+            if (nada === 'warn')  el.classList.add('is-warn');
+            if (nada === 'error') el.classList.add('is-error');
+            el.innerHTML = html;
+            el.classList.add('show');
+            if (_syncBarTimer) { clearTimeout(_syncBarTimer); _syncBarTimer = null; }
+            if (ms) _syncBarTimer = setTimeout(_syncBarHide, ms);
+        }
+
+        function _syncBarHide() {
+            const el = document.getElementById('sync-bar');
+            if (el) el.classList.remove('show');
+            if (_syncBarTimer) { clearTimeout(_syncBarTimer); _syncBarTimer = null; }
+        }
+
+        /** Gambarkan keadaan antrean apa adanya. Dipanggil setiap antrean berubah. */
+        function _renderSyncStatus(s) {
+            if (!s) return;
+
+            if (s.failed > 0) {
+                _syncBarShow(
+                    '<i class="ph ph-warning-circle"></i>' +
+                    '<span><b>' + s.failed + ' transaksi gagal dikirim.</b> ' +
+                    'Data masih tersimpan di perangkat ini dan tidak hilang.</span>' +
+                    '<button type="button" onclick="retrySyncTransaksi()">Coba Lagi</button>',
+                    'error', 0);
+                return;
+            }
+            if (s.offline && (s.pending + s.retry + s.processing) > 0) {
+                _syncBarShow(
+                    '<i class="ph ph-wifi-slash"></i>' +
+                    '<span><b>Menunggu koneksi.</b> ' + (s.pending + s.retry + s.processing) +
+                    ' transaksi tersimpan di perangkat dan akan dikirim otomatis.</span>',
+                    'warn', 0);
+                return;
+            }
+            if (s.retry > 0) {
+                _syncBarShow(
+                    '<i class="ph ph-arrow-clockwise spin-ico"></i>' +
+                    '<span>Mengirim ulang ' + s.retry + ' transaksi…</span>',
+                    'warn', 0);
+                return;
+            }
+            if (s.processing > 0 || s.pending > 0) {
+                const n = s.processing + s.pending;
+                _syncBarShow(
+                    '<i class="ph ph-circle-notch spin-ico"></i>' +
+                    '<span>Menyinkronkan ' + n + ' transaksi…</span>',
+                    'sync', 0);
+                return;
+            }
+            // Antrean kosong. Kalau sebelumnya ada yang sedang tampil, tutup
+            // dengan konfirmasi singkat supaya user tahu prosesnya benar selesai.
+            const el = document.getElementById('sync-bar');
+            if (el && el.classList.contains('show')) {
+                _syncBarShow('<i class="ph ph-check-circle"></i><span><b>Tersimpan.</b> Semua transaksi sudah masuk ke server.</span>',
+                    'ok', 2600);
+            }
+        }
+
+        /**
+         * Dipanggil SETIAP KALI user berhasil menulis data. Foto dibuang supaya
+         * pembukaan berikutnya tidak mungkin menampilkan angka sebelum transaksi
+         * yang baru saja disimpan.
+         */
+        function _invalidateSnapshot() {
+            const u = currentUser && currentUser.username;
+            // Bila user belum diketahui, buang SEMUA foto. Ini sisi yang aman:
+            // lebih baik satu boot lambat daripada menyisakan foto yang mungkin
+            // sudah tidak cocok dengan data di server.
+            try { u ? SIGAPCache.clear(u) : SIGAPCache.clearAll(); } catch (e) {}
+        }
+
+        // Dipasang untuk SIGAPGateway (blok skrip di <head>, yang tidak bisa
+        // melihat variabel di blok ini). Setiap panggilan backend yang bukan
+        // pembacaan akan memanggil kait ini.
+        // Dinaikkan SETIAP kali ada panggilan tulis. Dipakai untuk menolak
+        // penyimpanan foto dari jawaban yang SUDAH BASI — lihat _bootstrapData().
+        let _writeEpoch = 0;
+
+        window.__sigapOnWrite = function (action) {
+            _writeEpoch++;
+            _invalidateSnapshot();
+            // Data di layar sekarang lebih baru daripada foto mana pun, jadi
+            // penanda "data tersimpan" tidak boleh tertinggal menyala.
+            _sembunyikanPenandaSnapshot();
+        };
+
         // ============ [UPGRADE] PENYIMPANAN TOKEN SESI (LOGIN PERMANEN) ============
         // Sesi di server tidak punya masa berlaku, jadi yang perlu dijaga di sisi
         // browser hanyalah TOKEN-nya. Token disimpan BERLAPIS supaya tetap ada
@@ -14794,8 +15771,454 @@ let currentGroup = '', groupId = 0;
             return { call: call, showRecovery: showRecovery, execUrl: function () { return _execUrl; } };
         })();
 
+        // =====================================================================
+        // [DURABILITY] SIGAPQueue — ANTREAN TRANSAKSI YANG TAHAN MATI LISTRIK
+        // ---------------------------------------------------------------------
+        // MASALAH YANG DIPECAHKAN
+        // Sebelum ini, menyimpan transaksi berarti: tampilkan loader penuh layar,
+        // kirim, lalu tunggu. Bila koneksi putus di tengah jalan — atau tab
+        // ditutup, atau ponsel kehabisan baterai — INPUT USER HILANG TOTAL.
+        // Tidak ada jejaknya di mana pun, dan user tidak punya cara mengetahui
+        // apakah datanya masuk atau tidak.
+        //
+        // Dan bila waktu habis, keadaannya justru lebih berbahaya: permintaan
+        // BISA SAJA sudah tersimpan di server dan hanya jawabannya yang hilang.
+        // Mengirim ulang secara buta pada keadaan itu = transaksi ganda.
+        //
+        // CARA KERJA
+        // Transaksi dicatat ke IndexedDB LEBIH DULU, baru dikirim. Sejak baris
+        // itu tercatat, transaksi tidak bisa hilang lagi: tutup tab, buka lagi
+        // besok, antreannya tetap ada dan dilanjutkan.
+        //
+        //   PENDING -> PROCESSING -> SYNCED
+        //                  |
+        //                  +-> RETRY  (gangguan sesaat, jeda bertambah + acak)
+        //                  +-> FAILED (ditolak server — tidak diulang membabi buta)
+        //
+        // ATURAN YANG TIDAK BOLEH DILANGGAR
+        //   1. TIDAK ADA "kirim lalu lupakan". Setiap transaksi punya catatan,
+        //      punya status, dan punya akhir yang jelas.
+        //   2. Setiap transaksi membawa clientTxnId. Backend memakainya untuk
+        //      memastikan pengiriman kedua TIDAK menulis baris kedua.
+        //   3. Waktu habis TIDAK PERNAH langsung dianggap gagal. Statusnya
+        //      diperiksa dulu lewat verifyTransaction; kirim ulang hanya
+        //      dilakukan bila server memastikan transaksinya memang belum ada.
+        //   4. IndexedDB dipakai untuk muatan transaksi — BUKAN localStorage,
+        //      yang batasnya kecil dan menulisnya menghentikan layar.
+        //      Bila IndexedDB diblokir, antrean turun ke memori: fungsinya tetap
+        //      berjalan untuk sesi ini, dan itu dinyatakan apa adanya.
+        // =====================================================================
+        const SIGAPQueue = (function () {
+            const DB_NAME = 'SIGAP_TXN';
+            const DB_VER  = 1;
+            const STORE   = 'antrean';
+
+            const BASE_DELAY = 1500;      // jeda percobaan ulang pertama
+            const MAX_DELAY  = 60000;     // batas atas jeda
+            const MAX_RETRY  = 8;         // sesudah ini transaksi ditandai FAILED
+
+            let _db = null;
+            let _dbGagal = false;
+            const _mem = new Map();       // cadangan bila IndexedDB tidak tersedia
+            let _jalanTerjadwal = false;
+
+            // ---------- penyimpanan ----------
+            function buka() {
+                if (_db) return Promise.resolve(_db);
+                if (_dbGagal) return Promise.reject(new Error('IDB_TIDAK_TERSEDIA'));
+                return new Promise(function (resolve, reject) {
+                    let req;
+                    try { req = indexedDB.open(DB_NAME, DB_VER); }
+                    catch (e) { _dbGagal = true; reject(e); return; }
+                    req.onupgradeneeded = function () {
+                        const db = req.result;
+                        if (!db.objectStoreNames.contains(STORE)) {
+                            const st = db.createObjectStore(STORE, { keyPath: 'transactionId' });
+                            st.createIndex('status', 'status', { unique: false });
+                        }
+                    };
+                    req.onsuccess = function () { _db = req.result; resolve(_db); };
+                    req.onerror   = function () { _dbGagal = true; reject(req.error || new Error('IDB_GAGAL')); };
+                });
+            }
+
+            function tx(mode, fn) {
+                return buka().then(function (db) {
+                    return new Promise(function (resolve, reject) {
+                        const t = db.transaction(STORE, mode);
+                        const st = t.objectStore(STORE);
+                        let hasil;
+                        try { hasil = fn(st); } catch (e) { reject(e); return; }
+                        t.oncomplete = function () { resolve(hasil && hasil.result !== undefined ? hasil.result : hasil); };
+                        t.onerror    = function () { reject(t.error || new Error('IDB_TX_GAGAL')); };
+                        t.onabort    = function () { reject(t.error || new Error('IDB_TX_BATAL')); };
+                    });
+                });
+            }
+
+            // Penangan hasil (onDone/onFail) disimpan TERPISAH dari catatan.
+            //
+            // Ini bukan sekadar kerapian: IndexedDB menyimpan nilai dengan
+            // algoritma structured clone, yang MELEMPAR DataCloneError begitu
+            // menemukan sebuah fungsi. Menaruh onDone/onFail di dalam catatan
+            // membuat SETIAP penulisan gagal — dan karena kegagalan itu ditelan
+            // try/catch, antrean akan tampak bekerja padahal isinya tidak pernah
+            // benar-benar tersimpan. Justru pada keadaan yang paling
+            // membutuhkannya (tab tertutup, ponsel mati) tidak ada yang tersisa.
+            const _handler = new Map();   // transactionId -> { onDone, onFail }
+
+            /** Salinan catatan yang dijamin bisa di-clone — hanya data, tanpa fungsi. */
+            function bersih(rec) {
+                return {
+                    transactionId: rec.transactionId,
+                    action:        rec.action,
+                    payload:       rec.payload,
+                    label:         rec.label,
+                    createdAt:     rec.createdAt,
+                    status:        rec.status,
+                    retryCount:    rec.retryCount || 0,
+                    lastError:     rec.lastError || '',
+                    nextAttemptAt: rec.nextAttemptAt || 0,
+                    lastAttemptAt: rec.lastAttemptAt || 0
+                };
+            }
+
+            function simpan(rec) {
+                _mem.set(rec.transactionId, rec);     // salinan memori selalu ada
+                const datar = bersih(rec);
+                return tx('readwrite', function (st) { st.put(datar); })
+                    .catch(function () { /* IndexedDB diblokir -> memori saja */ });
+            }
+
+            function ambilSemua() {
+                return tx('readonly', function (st) { return st.getAll(); })
+                    .then(function (r) { return r || []; })
+                    .catch(function () { return Array.from(_mem.values()); });
+            }
+
+            function hapus(id) {
+                _mem.delete(id);
+                _handler.delete(id);
+                return tx('readwrite', function (st) { st.delete(id); }).catch(function () {});
+            }
+
+            // ---------- identitas transaksi ----------
+            /**
+             * Penanda unik per transaksi. Ini adalah METADATA, bukan kunci bisnis:
+             * nomor transaksi, SPB, PGR, dan seluruh penomoran lain tetap dibuat
+             * backend dengan rumus yang sama persis seperti sebelumnya.
+             */
+            function buatTxnId() {
+                let acak = '';
+                try {
+                    const a = new Uint8Array(8);
+                    crypto.getRandomValues(a);
+                    acak = Array.from(a).map(function (b) { return b.toString(16).padStart(2, '0'); }).join('');
+                } catch (e) {
+                    acak = Math.random().toString(16).slice(2, 18);
+                }
+                return 'CTX-' + Date.now().toString(36) + '-' + acak;
+            }
+
+            // ---------- jeda percobaan ulang ----------
+            /**
+             * Jeda bertambah dua kali lipat, DITAMBAH komponen acak.
+             * Komponen acaknya penting: tanpa itu, semua perangkat yang terputus
+             * pada saat yang sama akan mencoba ulang pada detik yang sama juga,
+             * lalu menjatuhkan server bersama-sama begitu koneksi pulih.
+             */
+            function jeda(retryCount) {
+                const dasar = Math.min(BASE_DELAY * Math.pow(2, retryCount), MAX_DELAY);
+                return Math.round(dasar * (0.7 + Math.random() * 0.6));
+            }
+
+            // ---------- pengiriman ----------
+            function kirimSatu(rec) {
+                const muatan = Object.assign({}, rec.payload, { clientTxnId: rec.transactionId });
+                // Batas waktu jalur tulis sengaja longgar; kalau pun terlampaui,
+                // verifikasi di bawah yang memutuskan, bukan tebakan.
+                return SIGAPNet.call(rec.action, [muatan],
+                    { timeout: 90000, attempts: 1, onRecover: false });
+            }
+
+            /**
+             * Sesudah waktu habis: TANYAKAN dulu, jangan kirim ulang.
+             * Inilah satu-satunya cara membedakan "belum masuk" dari
+             * "sudah masuk tapi jawabannya hilang" — dan bedanya besar sekali.
+             */
+            // Backend lama (belum di-deploy ulang) menjawab dengan kalimat ini.
+            // Harus dikenali: tanpa endpoint verifikasi, mengirim ulang berubah
+            // dari "aman" menjadi "tebakan" — dan tebakan di jalur stok berarti
+            // risiko transaksi ganda.
+            let _verifyTidakAda = false;
+
+            function verifikasi(rec) {
+                if (_verifyTidakAda) return Promise.resolve('TIDAK_DIDUKUNG');
+                return SIGAPNet.call('verifyTransaction', [{ clientTxnId: rec.transactionId }],
+                    { timeout: 20000, attempts: 2, onRecover: false })
+                    .then(function (res) {
+                        if (res && res.success && res.found) return res.result || { success: true };
+                        if (res && res.success === false && /tidak dikenal/i.test(res.message || '')) {
+                            _verifyTidakAda = true;
+                            return 'TIDAK_DIDUKUNG';
+                        }
+                        return null;    // server memastikan: benar-benar belum tersimpan
+                    })
+                    .catch(function (err) {
+                        // Transport bawaan HtmlService melaporkan fungsi yang
+                        // tidak ada sebagai PENOLAKAN, bukan jawaban bersukses-
+                        // false seperti doPost. Keduanya harus diperlakukan sama:
+                        // tanpa verifikasi, mengirim ulang adalah tebakan.
+                        if (err && err.code === 'AKSI_TIDAK_DIKENAL') {
+                            _verifyTidakAda = true;
+                            return 'TIDAK_DIDUKUNG';
+                        }
+                        return null;    // tidak bisa memastikan -> jangan tebak
+                    });
+            }
+
+            // ---------- status yang terlihat user ----------
+            const pendengar = new Set();
+            function beritahu() {
+                const s = ringkas();
+                pendengar.forEach(function (fn) { try { fn(s); } catch (e) {} });
+            }
+            function ringkas() {
+                const semua = Array.from(_mem.values());
+                return {
+                    total:      semua.length,
+                    pending:    semua.filter(function (r) { return r.status === 'PENDING'; }).length,
+                    processing: semua.filter(function (r) { return r.status === 'PROCESSING'; }).length,
+                    retry:      semua.filter(function (r) { return r.status === 'RETRY'; }).length,
+                    failed:     semua.filter(function (r) { return r.status === 'FAILED'; }).length,
+                    offline:    !navigator.onLine
+                };
+            }
+
+            // ---------- mesin antrean ----------
+            let _sedangJalan = false;
+
+            function jalankan() {
+                if (_sedangJalan) return Promise.resolve();
+                _sedangJalan = true;
+                return _putaran().then(function () { _sedangJalan = false; },
+                                       function () { _sedangJalan = false; });
+            }
+
+            function _putaran() {
+                if (!navigator.onLine) { beritahu(); return Promise.resolve(); }
+
+                const siap = Array.from(_mem.values())
+                    .filter(function (r) {
+                        return (r.status === 'PENDING' || r.status === 'RETRY') &&
+                               (!r.nextAttemptAt || r.nextAttemptAt <= Date.now());
+                    })
+                    .sort(function (a, b) { return a.createdAt - b.createdAt; });
+
+                if (!siap.length) { jadwalUlang(); beritahu(); return Promise.resolve(); }
+
+                // SATU per satu, bukan berbarengan — dua penulisan serentak ke
+                // Apps Script hanya akan berebut kunci yang sama di server.
+                //
+                // Yang tertua dikirim lebih dulu. Ini urutan terbaik yang bisa
+                // dijamin, BUKAN urutan mutlak: transaksi yang sedang menunggu
+                // jeda percobaan ulang dilewati dulu supaya tidak menahan yang
+                // lain. Itu aman di sistem ini karena setiap baris IN/OUT/OPNAME
+                // berdiri sendiri (append-only) dan stok dihitung dari jumlah
+                // seluruh baris — bukan dari urutan penulisannya. Nomor SPB pun
+                // tetap berurut karena selalu diambil ulang saat menulis.
+                return siap.reduce(function (rantai, rec) {
+                    return rantai.then(function () { return _proses(rec); });
+                }, Promise.resolve()).then(function () { jadwalUlang(); beritahu(); });
+            }
+
+            function _proses(rec) {
+                rec.status = 'PROCESSING';
+                rec.lastAttemptAt = Date.now();
+                simpan(rec); beritahu();
+
+                const habis = SIGAPPerf.start('TRANSACTION_SEND',
+                    { action: rec.action, retry: rec.retryCount });
+
+                return kirimSatu(rec)
+                    .then(function (res) {
+                        habis({ status: 'jawab' });
+                        return _selesaikan(rec, res);
+                    })
+                    .catch(function (err) {
+                        habis({ status: 'gagal', code: (err && err.code) || '' });
+                        const pesan = (err && err.message) || '';
+                        const waktuHabis = /TIMEOUT/i.test(pesan) || (err && err.kind === 'TIMEOUT');
+
+                        // Waktu habis / jaringan putus: PERIKSA DULU.
+                        if (waktuHabis || (err && err.kind === 'NETWORK_ERROR') || !navigator.onLine) {
+                            SIGAPPerf.mark('TRANSACTION_VERIFY', { action: rec.action });
+                            return verifikasi(rec).then(function (hasil) {
+                                if (hasil === 'TIDAK_DIDUKUNG') {
+                                    // Backend belum mengenal verifyTransaction, jadi
+                                    // status transaksi ini TIDAK BISA dipastikan.
+                                    // Mengirim ulang di sini adalah tebakan yang
+                                    // bisa menghasilkan baris kedua di Sheet.
+                                    // Yang benar: berhenti, dan katakan apa adanya
+                                    // supaya user memeriksa sendiri.
+                                    rec.status = 'FAILED';
+                                    rec.lastError = 'Status tidak dapat dipastikan (server belum diperbarui). ' +
+                                                    'Periksa data di Sheet sebelum menyimpan ulang.';
+                                    simpan(rec); beritahu();
+                                    const h = _handler.get(rec.transactionId);
+                                    try { h && h.onFail && h.onFail({ success: false, message: rec.lastError }); } catch (e) {}
+                                    return;
+                                }
+                                if (hasil) return _selesaikan(rec, hasil);   // ternyata SUDAH masuk
+                                return _tundaUlang(rec, err);                // dipastikan belum -> aman diulang
+                            });
+                        }
+                        return _tundaUlang(rec, err);
+                    });
+            }
+
+            function _selesaikan(rec, res) {
+                // Server menjawab, tetapi jawabannya bisa "ditolak". Penolakan
+                // aturan bisnis (mis. tanggal kosong, akses ditolak) TIDAK boleh
+                // diulang — mengulangnya hanya menghasilkan penolakan yang sama.
+                const h = _handler.get(rec.transactionId);
+
+                if (res && res.success === false) {
+                    // "busy" = kunci tulis sedang dipegang eksekusi lain. Itu
+                    // bukan penolakan, hanya antrean — jadi dicoba lagi.
+                    if (res.busy) return _tundaUlang(rec, { message: res.message || 'Server sibuk', kind: 'SERVER_ERROR' });
+                    rec.status    = 'FAILED';
+                    rec.lastError = res.message || 'Ditolak server.';
+                    simpan(rec); beritahu();
+                    try { h && h.onFail && h.onFail(res); } catch (e) {}
+                    return;
+                }
+
+                rec.status = 'SYNCED';
+                simpan(rec); beritahu();
+                SIGAPPerf.mark('TRANSACTION_COMMIT', { action: rec.action, retry: rec.retryCount });
+                try { h && h.onDone && h.onDone(res); } catch (e) {}
+                _handler.delete(rec.transactionId);
+                // Sudah pasti tersimpan di server — catatannya tidak diperlukan lagi.
+                return hapus(rec.transactionId).then(beritahu);
+            }
+
+            function _tundaUlang(rec, err) {
+                rec.retryCount = (rec.retryCount || 0) + 1;
+                rec.lastError  = (err && err.message) || 'Gagal mengirim.';
+                if (rec.retryCount >= MAX_RETRY) {
+                    rec.status = 'FAILED';
+                    simpan(rec); beritahu();
+                    const h = _handler.get(rec.transactionId);
+                    try { h && h.onFail && h.onFail({ success: false, message: rec.lastError }); } catch (e) {}
+                    return;
+                }
+                rec.status = 'RETRY';
+                rec.nextAttemptAt = Date.now() + jeda(rec.retryCount);
+                simpan(rec); beritahu();
+            }
+
+            function jadwalUlang() {
+                if (_jalanTerjadwal) return;
+                const menunggu = Array.from(_mem.values())
+                    .filter(function (r) { return r.status === 'PENDING' || r.status === 'RETRY'; });
+                if (!menunggu.length) return;
+                const paling = menunggu.reduce(function (a, r) {
+                    return Math.min(a, r.nextAttemptAt || 0);
+                }, Infinity);
+                const delay = Math.max(500, (paling === Infinity ? 0 : paling) - Date.now());
+                _jalanTerjadwal = true;
+                setTimeout(function () { _jalanTerjadwal = false; jalankan(); }, delay);
+            }
+
+            // ---------- pintu masuk ----------
+            /**
+             * Masukkan satu transaksi ke antrean.
+             * Kembalikan transactionId SEKETIKA — pemanggil tidak menunggu server,
+             * tetapi transaksinya sudah tercatat dan pasti akan dikirim.
+             */
+            function enqueue(action, payload, opts) {
+                opts = opts || {};
+                const rec = {
+                    transactionId: buatTxnId(),
+                    action:        action,
+                    payload:       payload,
+                    label:         opts.label || action,
+                    createdAt:     Date.now(),
+                    status:        'PENDING',
+                    retryCount:    0,
+                    lastError:     '',
+                    nextAttemptAt: 0
+                };
+                // Penangan hasil hanya hidup selama halaman terbuka; antrean yang
+                // dipulihkan setelah halaman dibuka ulang tetap terkirim, hanya
+                // tanpa penangan — persis seperti yang seharusnya. Disimpan di
+                // peta terpisah supaya catatan tetap bisa ditulis ke IndexedDB.
+                if (opts.onDone || opts.onFail) {
+                    _handler.set(rec.transactionId, { onDone: opts.onDone, onFail: opts.onFail });
+                }
+
+                _mem.set(rec.transactionId, rec);
+                SIGAPPerf.mark('TRANSACTION_QUEUE', { action: action });
+                simpan(rec).then(function () { beritahu(); jalankan(); });
+                beritahu();
+                return rec.transactionId;
+            }
+
+            /** Pulihkan antrean yang tertinggal dari sesi sebelumnya. */
+            function pulihkan() {
+                return ambilSemua().then(function (semua) {
+                    semua.forEach(function (r) {
+                        if (r.status === 'SYNCED') { hapus(r.transactionId); return; }
+                        // PROCESSING yang tertinggal berarti halaman tertutup di
+                        // tengah pengiriman — nasibnya tidak diketahui, jadi
+                        // dikembalikan ke antrean. Idempotensi di backend yang
+                        // memastikan ini tidak menghasilkan baris kedua.
+                        if (r.status === 'PROCESSING') { r.status = 'RETRY'; r.nextAttemptAt = 0; }
+                        if (!_mem.has(r.transactionId)) _mem.set(r.transactionId, r);
+                    });
+                    beritahu();
+                    if (_mem.size) jalankan();
+                }).catch(function () {});
+            }
+
+            /** Coba lagi seluruh transaksi yang sudah ditandai gagal. */
+            function retryFailed() {
+                _mem.forEach(function (r) {
+                    if (r.status === 'FAILED') { r.status = 'RETRY'; r.retryCount = 0; r.nextAttemptAt = 0; simpan(r); }
+                });
+                beritahu(); jalankan();
+            }
+
+            /** Buang seluruh antrean — hanya dipakai saat logout. */
+            function bersihkan() {
+                const ids = Array.from(_mem.keys());
+                _mem.clear();
+                ids.forEach(function (id) { hapus(id); });
+                beritahu();
+            }
+
+            // Koneksi pulih -> lanjutkan tanpa diminta.
+            window.addEventListener('online',  function () { SIGAPPerf.mark('NET_ONLINE'); jalankan(); beritahu(); });
+            window.addEventListener('offline', function () { SIGAPPerf.mark('NET_OFFLINE'); beritahu(); });
+            // Kembali ke tab ini setelah lama ditinggal -> periksa antrean.
+            document.addEventListener('visibilitychange', function () {
+                if (!document.hidden) jalankan();
+            });
+
+            return {
+                enqueue: enqueue, pulihkan: pulihkan, jalankan: jalankan,
+                retryFailed: retryFailed, bersihkan: bersihkan,
+                ringkas: ringkas, buatTxnId: buatTxnId,
+                onChange: function (fn) { pendengar.add(fn); return function () { pendengar.delete(fn); }; }
+            };
+        })();
+
         // ===================== AUTH & ROLE =====================
         let currentUser = null;
+        // Penanda agar antrean transaksi hanya dipasang sekali per halaman,
+        // walaupun _startApp() dipanggil lagi setelah logout lalu login kembali.
+        let _queueTerpasang = false;
 
         // ===================== [UPGRADE] ROLE MATRIX =====================
         // ADMIN   = full access (termasuk User Management)
@@ -14863,10 +16286,51 @@ let currentGroup = '', groupId = 0;
             return false;
         }
 
+        // =====================================================================
+        // [PERF] PREFETCH BOOTSTRAP — DUA PERMINTAAN DIJALANKAN BERBARENGAN
+        // ---------------------------------------------------------------------
+        // Sebelumnya boot aplikasi berjalan BERURUTAN:
+        //     checkSession (2-4 dtk)  ->  baru  getBootstrapData (2-8 dtk)
+        // Totalnya 5-12 detik menatap layar kosong, padahal permintaan kedua
+        // TIDAK membutuhkan hasil permintaan pertama — keduanya hanya perlu
+        // token yang sama, dan token itu sudah ada di tangan sejak detik nol.
+        //
+        // Sekarang keduanya ditembakkan bersamaan, jadi total tunggu tinggal
+        // selama yang paling lambat saja (2-8 dtk), bukan jumlah keduanya.
+        //
+        // Bila ternyata sesi TIDAK berlaku, hasil prefetch cukup dibuang.
+        // Ongkosnya satu permintaan terbuang pada kasus yang jarang terjadi —
+        // jauh lebih murah daripada menambah 2-4 detik pada SETIAP kali buka.
+        // Keamanan tidak berubah: backend tetap memverifikasi token pada
+        // getBootstrapData, jadi prefetch dengan token kedaluwarsa tidak
+        // mengembalikan data apa pun.
+        // =====================================================================
+        let _bootPrefetch = null;
+        let _bootPrefetchEpoch = 0;
+
+        function _prefetchBootstrap() {
+            try {
+                _bootPrefetchEpoch = _writeEpoch;
+                // onRecover: false — dialog "Sambungan Terputus" tidak boleh
+                // muncul dari permintaan spekulatif ini, karena bisa menimpa
+                // layar login saat sesinya memang sudah habis. Bila prefetch
+                // gagal, _bootstrapData() mengulanginya dengan pemulihan aktif.
+                _bootPrefetch = SIGAPNet.call('getBootstrapData',
+                    [_withAuth({ startDate: _currentMonthStart(), withImages: true, withSmartExp: true, horizonDays: 60 })],
+                    { timeout: 90000, attempts: 2, onRecover: false });
+                // Penangan kosong: mencegah "unhandled rejection" bila sesi
+                // ternyata tidak berlaku dan hasilnya tidak pernah dipakai.
+                _bootPrefetch.catch(function () {});
+            } catch (e) {
+                _bootPrefetch = null;
+            }
+        }
+
         function initAuth() {
             const token = _authToken();
             if (!token) return _showLoginScreen();
             showLoader(true);
+            _prefetchBootstrap();     // jalan BERBARENGAN dengan checkSession di bawah
             _verifySession(token);
         }
 
@@ -14896,8 +16360,10 @@ let currentGroup = '', groupId = 0;
                 _showLoginScreen();          // token sengaja TIDAK dihapus
             }, 2500);
 
+            const habisSesi = SIGAPPerf.start('SESSION_CHECK');
             SIGAPNet.call('checkSession', [token], { timeout: 15000, attempts: 3, onRecover: true })
                 .then(res => {
+                    habisSesi({ status: (res && res.success) ? 'berlaku' : 'habis' });
                     clearTimeout(revealLogin);
                     if (res && res.success) {
                         showLoader(false);
@@ -14911,7 +16377,8 @@ let currentGroup = '', groupId = 0;
                     showLoader(false);
                     if (!loginSudahTampil) _showLoginScreen();
                 })
-                .catch(() => {
+                .catch(err => {
+                    habisSesi({ status: 'gagal', code: (err && err.code) || '' });
                     // Gangguan koneksi: token DIPERTAHANKAN supaya sesi bisa pulih
                     // sendiri saat aplikasi dibuka lagi — sama seperti sebelumnya.
                     clearTimeout(revealLogin);
@@ -14947,8 +16414,10 @@ let currentGroup = '', groupId = 0;
             // ulang otomatis untuk gangguan sesaat, dan bila transport Apps Script
             // memang putus user menerima tombol pemulihan — bukan sekadar pesan
             // "Koneksi server gagal. Coba lagi." yang buntu.
+            const habisLogin = SIGAPPerf.start('LOGIN');
             SIGAPNet.call('loginUser', [{ username, password }], { timeout: 25000, attempts: 3, onRecover: true })
                 .then(res => {
+                    habisLogin({ status: (res && res.success) ? 'ok' : 'ditolak' });
                     pulihkanTombol();
                     if (res && res.success) {
                         saveAuthToken(res.token);   // sesi bertahan sampai user menekan Keluar
@@ -14962,6 +16431,7 @@ let currentGroup = '', groupId = 0;
                     }
                 })
                 .catch(err => {
+                    habisLogin({ status: 'gagal', code: (err && err.code) || '' });
                     pulihkanTombol();
                     const habisWaktu = err && /TIMEOUT/i.test(err.message || '');
                     errEl.textContent = habisWaktu
@@ -14972,6 +16442,39 @@ let currentGroup = '', groupId = 0;
         }
 
         function doLogout() {
+            // =============================================================
+            // [DURABILITY] JANGAN PERNAH KELUAR SAMBIL MEMBUANG TRANSAKSI
+            // -------------------------------------------------------------
+            // Sebagian transaksi (Stock Opname) membawa token sesi. Begitu user
+            // keluar, token itu dicabut di server, sehingga transaksi yang masih
+            // mengantre pasti ditolak "sesi kedaluwarsa" — dan hasil hitung fisik
+            // di gudang ikut hilang bersamanya.
+            //
+            // Karena itu keluar DITAHAN selama masih ada yang belum terkirim,
+            // dan alasannya dikatakan apa adanya. Ini satu-satunya tempat di
+            // seluruh upaya percepatan ini yang sengaja membuat user MENUNGGU —
+            // karena di sini menunggu memang pilihan yang benar.
+            // =============================================================
+            const antre = SIGAPQueue.ringkas();
+            const belumTerkirim = antre.pending + antre.processing + antre.retry + antre.failed;
+            if (belumTerkirim > 0) {
+                Swal.fire({
+                    title: 'Masih Ada Transaksi Belum Terkirim',
+                    html: '<div style="text-align:left; font-size:0.86rem; line-height:1.6;">' +
+                          '<p style="margin:0 0 10px;"><b>' + belumTerkirim + ' transaksi</b> masih menunggu dikirim ke server.</p>' +
+                          '<p style="margin:0 0 10px;">Datanya aman tersimpan di perangkat ini, tetapi pengirimannya ' +
+                          'membutuhkan sesi Anda. Bila keluar sekarang, transaksi itu tidak bisa diselesaikan.</p>' +
+                          '<p style="margin:0;">Tunggu sampai penanda di bawah layar menunjukkan <b>Tersimpan</b>, lalu keluar.</p>' +
+                          '</div>',
+                    icon: 'warning',
+                    confirmButtonText: 'Mengerti',
+                    confirmButtonColor: 'var(--accent)',
+                    background: 'var(--surface)', color: 'var(--text)'
+                });
+                SIGAPQueue.jalankan();     // dorong antrean supaya cepat selesai
+                return;
+            }
+
             Swal.fire({
                 title: 'Keluar?', text: 'Anda akan keluar dari sesi ini.',
                 icon: 'question', showCancelButton: true,
@@ -14983,6 +16486,19 @@ let currentGroup = '', groupId = 0;
                 const token = _authToken();
                 if (token) google.script.run.logoutUser(token); // fire & forget
                 clearAuthToken();                               // bersihkan SEMUA lapisan token
+
+                // [PERF/KEAMANAN] Foto data ikut dibuang saat logout. Tanpa ini,
+                // user berikutnya di perangkat yang sama bisa melihat sekilas
+                // data stok milik user sebelumnya sebelum data miliknya tiba.
+                // clearAll() dipakai (bukan clear(user)) supaya sisa foto dari
+                // sesi mana pun di perangkat ini ikut terhapus.
+                try { SIGAPCache.clearAll(); } catch (e) {}
+                _sembunyikanPenandaSnapshot();
+                // Antrean sudah dipastikan kosong di atas, jadi ini hanya
+                // merapikan sisa catatan SYNCED yang belum sempat terhapus.
+                try { SIGAPQueue.bersihkan(); } catch (e) {}
+                _syncBarHide();
+                _bootPrefetch = null;
 
                 // [FIX] JANGAN memakai window.location.reload().
                 // Aplikasi berjalan di dalam IFRAME SANDBOX Apps Script
@@ -15069,7 +16585,19 @@ let currentGroup = '', groupId = 0;
         }
 
         function _startApp() {
+            SIGAPPerf.mark('APP_BOOT_START');
             document.getElementById('login-screen').classList.add('hidden');
+
+            // [DURABILITY] Lanjutkan transaksi yang tertinggal dari sesi sebelumnya.
+            // Inilah yang membuat "tab ditutup saat menyimpan" berhenti berarti
+            // "data hilang". Dipasang SEKALI, dan dijalankan sebelum data apa pun
+            // diambil — transaksi user selalu lebih penting daripada tampilan.
+            if (!_queueTerpasang) {
+                _queueTerpasang = true;
+                SIGAPQueue.onChange(_renderSyncStatus);
+                SIGAPQueue.pulihkan();
+            }
+
             // Chip user di header
             const chip = document.getElementById('user-chip');
             chip.style.display = 'flex';
@@ -15144,35 +16672,129 @@ let currentGroup = '', groupId = 0;
             // jadi penggabungan ini tidak membuat server bekerja lebih berat.
             // -------------------------------------------------------------
             if (typeof DashBoot !== 'undefined') DashBoot.tick('master');
-            SIGAPNet.call('getBootstrapData',
-                          [_withAuth({ startDate: start, withImages: true, withSmartExp: true, horizonDays: 60 })],
-                          { timeout: 90000, attempts: 2, onRecover: true })
+
+            // -------------------------------------------------------------
+            // [PERF] LANGKAH 1 — ISI LAYAR SEKARANG JUGA DARI FOTO TERAKHIR.
+            // Kalau ada foto data milik user ini yang masih segar, layar
+            // langsung terisi TANPA menunggu server. Permintaan ke server di
+            // bawah tetap berjalan dan akan menimpa isinya begitu tiba, jadi
+            // angka yang akhirnya dilihat user tetap angka asli dari Sheet.
+            // -------------------------------------------------------------
+            let adaSnapshot = false;
+            const snap = SIGAPCache.load(currentUser && currentUser.username);
+            if (snap) {
+                try {
+                    // _applyBootstrapPayload() sudah memanggil DashBoot.finish()
+                    // di dalamnya, jadi popup progres ikut tertutup di sini —
+                    // tidak perlu (dan tidak boleh) dipanggil dua kali.
+                    _applyBootstrapPayload(snap.data, start);
+                    _tampilkanPenandaSnapshot(snap.ageMs, false);
+                    adaSnapshot = true;
+                } catch (e) {
+                    // Foto rusak / bentuknya tidak cocok dengan versi kode ini.
+                    console.warn('Snapshot gagal dipakai, diabaikan:', e && e.message);
+                    SIGAPCache.clear(currentUser && currentUser.username);
+                    adaSnapshot = false;
+                }
+            }
+
+            // -------------------------------------------------------------
+            // [PERF] LANGKAH 2 — PAKAI PERMINTAAN YANG SUDAH JALAN SEJAK AWAL.
+            // _prefetchBootstrap() menembakkan getBootstrapData BERSAMAAN dengan
+            // checkSession, bukan sesudahnya. Dua permintaan yang tadinya
+            // BERURUTAN (2-4 detik + 2-8 detik) kini BERBARENGAN, jadi total
+            // tunggu tinggal selama yang paling lambat saja.
+            // -------------------------------------------------------------
+            const pre = _bootPrefetch;
+            _bootPrefetch = null;
+
+            // -------------------------------------------------------------
+            // [PERF] LANGKAH 3 — PILIH JALUR TERCEPAT UNTUK KEADAAN SAAT INI.
+            //
+            //   ADA PREFETCH (user membuka aplikasi dengan token tersimpan):
+            //     permintaan gelombang penuh SUDAH berjalan sejak detik nol,
+            //     berbarengan dengan checkSession. Dipakai apa adanya — memulai
+            //     permintaan baru justru membuang yang sudah separuh jalan.
+            //
+            //   TANPA PREFETCH (user BARU SAJA menekan Masuk):
+            //     tidak ada apa pun yang sedang berjalan, jadi inilah tempat
+            //     pemisahan kritis/tunda benar-benar berguna. Master datang
+            //     lebih dulu supaya layar langsung bisa dipakai; kartu stock,
+            //     barang keluar, exp, foto, dan rekomendasi menyusul di latar
+            //     belakang tanpa menahan apa pun.
+            // -------------------------------------------------------------
+            const habisBoot = SIGAPPerf.start('APP_BOOT', { jalur: pre ? 'prefetch' : 'dua-gelombang' });
+
+            let minta;
+            if (pre) {
+                // Bila prefetch gagal, panggilan sungguhan diulang SEKALI dengan
+                // dialog pemulihan aktif — persis perilaku sebelum ada prefetch.
+                minta = pre.catch(() => _callBootstrap(start));
+            } else {
+                minta = _callBootstrapKritis(start)
+                    .then(res => {
+                        // Gelombang kedua ditembakkan SESUDAH yang pertama tiba,
+                        // bukan berbarengan: dua permintaan serentak ke Apps Script
+                        // justru saling mengantre di sisi Google. Prioritas P1
+                        // memastikan ia tidak pernah menghalangi transaksi user.
+                        const d = (res && res.success && res.data) ? res.data : null;
+                        if (d && d.master) {
+                            _applyBootstrapPayload(d, start);       // layar hidup SEKARANG
+                            SIGAPPerf.mark('APP_SHELL_READY');
+                        }
+                        return _callBootstrapTunda(start).then(res2 => {
+                            // Kedua gelombang digabung menjadi satu muatan yang
+                            // bentuknya sama persis dengan jawaban penuh, supaya
+                            // penanganan di bawah (termasuk penyimpanan foto)
+                            // tidak perlu tahu lewat jalur mana data ini datang.
+                            const d2 = (res2 && res2.success && res2.data) ? res2.data : {};
+                            return { success: true, data: Object.assign({}, d || {}, d2) };
+                        });
+                    })
+                    // Gelombang terpisah gagal (mis. backend belum mengenal
+                    // `parts`) -> kembali ke permintaan penuh yang lama.
+                    .catch(() => _callBootstrap(start));
+            }
+            minta = minta.then(r => { habisBoot({ status: 'ok' }); return r; },
+                               e => { habisBoot({ status: 'gagal' }); throw e; });
+
+            // Penanda waktu permintaan ini DIKIRIM. Bila di tengah jalan user
+            // sempat menyimpan sesuatu, jawaban yang tiba nanti sudah BASI —
+            // isinya dibaca server SEBELUM transaksi itu masuk. Data seperti itu
+            // tidak boleh disimpan sebagai foto, karena akan membuat pembukaan
+            // berikutnya menampilkan angka SEBELUM transaksi user sendiri.
+            // Memakai epoch prefetch (yang paling tua) di jalur mana pun adalah
+            // sisi yang aman: paling banter foto tidak jadi disimpan.
+            const epochSaatKirim = pre ? _bootPrefetchEpoch : _writeEpoch;
+
+            minta
                 .then(res => {
                     const d = (res && res.success && res.data) ? res.data : null;
                     if (!d) throw new Error('BOOTSTRAP_KOSONG');
 
-                    // Bentuk tiap sub-hasil sama persis dengan endpoint aslinya,
-                    // jadi handler yang dipakai pun handler yang sudah ada.
-                    if (d.master) _applyMasterData(d.master);
+                    _applyBootstrapPayload(d, start);
 
-                    // Buka blokir UI! User sudah bisa langsung mengisi Form Keluar / Scan Barcode.
-                    if (typeof DashBoot !== 'undefined') DashBoot.finish();
+                    // Data asli sudah tiba — penanda "data tersimpan" dicabut.
+                    _sembunyikanPenandaSnapshot();
 
-                    if (d.outbound && d.outbound.success) _applyOutboundData(d.outbound);
-                    if (d.stock    && d.stock.success)    _applyStockData(d.stock);
-                    if (d.exp      && d.exp.success)      _applyExpData(d.exp, start);
-                    // KPI "SKU Aktif" — isi yang sama dengan hasil refreshMasterStats().
-                    if (d.masterStats && d.masterStats.success) globalMasterStats = d.masterStats.data;
-                    if (d.images)   _applyItemImages(d.images);
-                    if (d.smartExp) _applySmartExp(d.smartExp);
-
-                    if (typeof renderDashboard === 'function') renderDashboard();
+                    // Simpan sebagai foto untuk pembukaan berikutnya. Disimpan
+                    // HANYA bila (a) server menjawab sukses DAN (b) tidak ada
+                    // penulisan yang menyusul sejak permintaan ini dikirim.
+                    if (_writeEpoch === epochSaatKirim) {
+                        SIGAPCache.save(currentUser && currentUser.username, d);
+                    }
                 })
                 .catch(err => {
                     // Backend belum di-deploy ulang (belum mengenal withImages/
                     // withSmartExp), atau permintaannya gagal: pakai jalur lama.
                     if (typeof DashBoot !== 'undefined') DashBoot.finish();
                     console.warn('getBootstrapData gagal, memakai jalur terpisah:', err && err.message);
+                    if (adaSnapshot) {
+                        // Layar sedang menampilkan foto lama DAN server tidak bisa
+                        // dihubungi. Ini keadaan paling berbahaya di sistem stok,
+                        // jadi penandanya dinaikkan menjadi peringatan tegas.
+                        _tampilkanPenandaSnapshot(snap.ageMs, true);
+                    }
                     _startAppFallback();
                     loadItemImages(() => loadSmartExp(false));
                 })
@@ -15180,7 +16802,174 @@ let currentGroup = '', groupId = 0;
                     // Pustaka berat dihangatkan saat browser senggang, setelah
                     // semua permintaan data selesai — tidak mengganggu apa pun.
                     if (window.SIGAPLib) SIGAPLib.warm();
+                    _prefetchPerRole();
                 });
+        }
+
+        // =====================================================================
+        // [PERF] PREFETCH BERDASARKAN ROLE
+        // ---------------------------------------------------------------------
+        // Setelah seluruh data awal selesai, browser menganggur beberapa detik
+        // sebelum user menekan tab apa pun. Waktu itu dipakai untuk menyiapkan
+        // data yang HAMPIR PASTI diminta berikutnya oleh role yang sedang login.
+        //
+        // Aturannya ketat supaya tidak berubah menjadi pemborosan:
+        //   • Hanya data yang memang sudah ada di alur role tersebut — tidak ada
+        //     asumsi baru tentang apa yang boleh dilihat siapa.
+        //   • Prioritas P2 (paling rendah): tidak pernah mendahului transaksi.
+        //   • Dijalankan saat browser senggang, dan hanya kalau sedang online.
+        //   • Jawabannya tidak dipasang ke layar — hanya menghangatkan cache
+        //     backend dan penggabung permintaan di gateway. Saat user benar-
+        //     benar membuka tabnya, permintaan aslinya berjalan seperti biasa
+        //     dan dijawab dari cache dalam waktu jauh lebih singkat.
+        //   • Kegagalan diabaikan sepenuhnya: ini bonus, bukan kebutuhan.
+        // =====================================================================
+        let _prefetchSudah = false;
+
+        function _prefetchPerRole() {
+            if (_prefetchSudah || !navigator.onLine) return;
+            _prefetchSudah = true;
+
+            const role    = _currentRole();
+            const allowed = ROLE_TABS[role] || ROLE_TABS['STOCK KEEPER'];
+            const tugas   = [];
+
+            // Master Item: layar pertama yang dibuka ADMIN/MANAGER sesudah dashboard.
+            if (allowed.includes('tab-master')) {
+                tugas.push(['getAllMasterItems', _withAuth({})]);
+            }
+            // Laporan Opname: berat, dan selalu dibuka bersama tab Opname.
+            if (allowed.includes('tab-opname')) {
+                tugas.push(['getOpnameReport', _withAuth({})]);
+            }
+            // Riwayat Masuk: dipakai SEMUA role, dan satu-satunya data utama
+            // yang belum ikut dalam bootstrap.
+            if (allowed.includes('tab-masuk')) {
+                tugas.push(['getInboundData', undefined]);
+            }
+
+            if (!tugas.length) return;
+
+            const jalan = () => {
+                tugas.forEach(([aksi, muatan]) => {
+                    try {
+                        SIGAPGateway.call(aksi, muatan, { priority: SIGAPGateway.P2 })
+                            .then(() => SIGAPPerf.mark('PREFETCH_OK', { action: aksi }),
+                                  () => SIGAPPerf.mark('PREFETCH_GAGAL', { action: aksi }));
+                    } catch (e) {}
+                });
+            };
+            if ('requestIdleCallback' in window) requestIdleCallback(jalan, { timeout: 6000 });
+            else setTimeout(jalan, 3000);
+        }
+
+        /** Satu panggilan getBootstrapData dengan setelan baku. */
+        function _callBootstrap(start) {
+            return SIGAPNet.call('getBootstrapData',
+                [_withAuth({ startDate: start, withImages: true, withSmartExp: true, horizonDays: 60 })],
+                { timeout: 90000, attempts: 2, onRecover: true });
+        }
+
+        // =====================================================================
+        // [PERF] BOOT DUA GELOMBANG — KRITIS DULU, SISANYA MENYUSUL
+        // ---------------------------------------------------------------------
+        // Permintaan bootstrap tunggal memang memangkas jumlah round-trip, tetapi
+        // menyisakan satu masalah: layar baru bisa dipakai setelah bagian
+        // TERLAMBAT selesai. Kalau kartu stock butuh 6 detik, user menunggu 6
+        // detik — padahal untuk mulai bekerja ia hanya butuh master item.
+        //
+        //   KRITIS  : master + statistik SKU   -> layar hidup, scan & form jalan
+        //   TUNDA   : kartu stock, barang keluar, exp, foto, rekomendasi
+        //
+        // Dipakai HANYA sebagai jalur cadangan yang lebih baik: kalau prefetch
+        // gelombang penuh sudah berjalan, hasilnya tetap dipakai apa adanya.
+        // Backend mengabaikan `parts` bila belum di-deploy ulang, dan dalam hal
+        // itu jawabannya justru berisi SEMUA bagian — tetap benar, hanya tidak
+        // sehemat yang diharapkan. Tidak ada jalur yang bisa rusak karenanya.
+        // =====================================================================
+        function _callBootstrapKritis(start) {
+            return SIGAPNet.call('getBootstrapData',
+                [_withAuth({ startDate: start, parts: ['master', 'masterStats'] })],
+                { timeout: 45000, attempts: 2, onRecover: false });
+        }
+
+        function _callBootstrapTunda(start) {
+            return SIGAPNet.call('getBootstrapData',
+                [_withAuth({
+                    startDate: start,
+                    parts: ['stock', 'outbound', 'exp'],
+                    withImages: true, withSmartExp: true, horizonDays: 60
+                })],
+                { timeout: 90000, attempts: 2, onRecover: false });
+        }
+
+        /**
+         * Pasang satu muatan getBootstrapData ke seluruh layar.
+         * Dipakai DUA KALI dengan isi yang sama persis: sekali dari foto
+         * tersimpan (supaya layar langsung terisi) dan sekali dari jawaban
+         * server (menimpa foto itu dengan angka asli). Karena keduanya lewat
+         * fungsi ini, tidak ada jalur render kembar yang bisa berbeda perilaku.
+         */
+        // Penanda generasi: bila muatan yang lebih baru datang sementara muatan
+        // lama masih dirender bertahap, sisa langkah muatan lama dibatalkan.
+        // Tanpa ini, foto data lama bisa menimpa data asli yang baru saja tiba.
+        let _applyGen = 0;
+
+        function _applyBootstrapPayload(d, start) {
+            if (!d) return;
+            const gen = ++_applyGen;
+
+            // =============================================================
+            // [PERF] RENDER BERTAHAP — YANG DILIHAT DULU, YANG BERAT MENYUSUL
+            // -------------------------------------------------------------
+            // Versi lama memasang KETUJUH bagian dalam satu tarikan napas:
+            // master, barang keluar, kartu stock, exp, foto, Smart EXP, lalu
+            // renderDashboard(). Pada data sungguhan itu satu blok kerja yang
+            // panjang di satu-satunya thread yang dimiliki browser — selama
+            // blok itu berjalan, layar TIDAK BISA menggambar apa pun dan
+            // sentuhan user tidak direspons. Jadi meski datanya sudah tiba,
+            // aplikasi masih terasa beku beberapa saat.
+            //
+            // Sekarang hanya master yang dikerjakan seketika (itu yang membuka
+            // blokir Form Keluar & Scan). Sisanya dipecah ke frame-frame
+            // berikutnya, sehingga browser sempat menggambar di sela-selanya.
+            //
+            // Urutannya persis urutan yang dilihat user: KPI -> tabel utama ->
+            // exp -> foto -> analitik. Hasil akhirnya sama, hanya cara
+            // menyusunnya yang tidak lagi menahan layar.
+            // =============================================================
+            if (d.master) _applyMasterData(d.master);
+
+            // Buka blokir UI! User sudah bisa langsung mengisi Form Keluar / Scan Barcode.
+            if (typeof DashBoot !== 'undefined') DashBoot.finish();
+
+            // KPI "SKU Aktif" — ringan, ikut gelombang pertama.
+            if (d.masterStats && d.masterStats.success) globalMasterStats = d.masterStats.data;
+
+            const langkah = [
+                () => { if (d.outbound && d.outbound.success) _applyOutboundData(d.outbound); },
+                () => { if (d.stock    && d.stock.success)    _applyStockData(d.stock); },
+                () => { if (typeof renderDashboard === 'function') renderDashboard(); },
+                () => { if (d.exp      && d.exp.success)      _applyExpData(d.exp, start); },
+                () => { if (d.images)   _applyItemImages(d.images); },
+                () => { if (d.smartExp) _applySmartExp(d.smartExp); },
+                () => { if (typeof renderDashboard === 'function') renderDashboard(); }
+            ];
+
+            const berikutnya = (i) => {
+                if (gen !== _applyGen) return;      // sudah ada muatan yang lebih baru
+                if (i >= langkah.length) return;
+                try { langkah[i](); }
+                catch (e) { console.warn('render bertahap gagal di langkah ' + i + ':', e && e.message); }
+                _frameBerikut(() => berikutnya(i + 1));
+            };
+            _frameBerikut(() => berikutnya(0));
+        }
+
+        /** Jalankan pada frame berikutnya; jatuh ke setTimeout bila perlu. */
+        function _frameBerikut(fn) {
+            if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => fn());
+            else setTimeout(fn, 0);
         }
 
         // Fallback: 4 panggilan terpisah (perilaku lama, tetap kompatibel penuh).
