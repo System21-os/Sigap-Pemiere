@@ -151,91 +151,83 @@
     //  5. Tidak ada penggabungan permintaan kembar. Dua bagian layar yang
     //     meminta data sama pada saat bersamaan mengirim dua permintaan.
     //     Di Apps Script satu permintaan berbiaya 2-4 detik, jadi ini mahal.
+    //
+    // ---------------------------------------------------------------------
+    // [TRANSPORT v2] UPGRADE KETAHANAN KONEKSI (HANYA LAPISAN TRANSPORT)
+    // ---------------------------------------------------------------------
+    //  6. JALUR APPS SCRIPT DIKEMBALIKAN KE google.script.run ASLI.
+    //     Versi sebelumnya MENIMPA window.google.script tanpa syarat, sehingga
+    //     saat Index.html dibuka langsung dari Apps Script pun semua panggilan
+    //     ikut lewat fetch(/exec) + redirect. Sekarang: bila google.script.run
+    //     bawaan tersedia, itulah yang dipakai (mode "native"); fetch hanya
+    //     dipakai di GitHub Pages / hosting statis (mode "gateway"). Kontrak,
+    //     payload dan respons SAMA — yang berbeda hanya transport-nya.
+    //  7. RETRY HANYA UNTUK GANGGUAN SESAAT (jaringan putus, timeout, HTTP
+    //     408/429/500/502/503/504), dengan exponential backoff + jitter dan
+    //     batas percobaan. Jawaban server yang sah (password salah, akun
+    //     nonaktif, akses ditolak, validasi bisnis) TIDAK PERNAH diulang —
+    //     jawaban itu datang sebagai JSON sukses dan langsung diteruskan.
+    //     Panggilan TULIS tidak diulang otomatis kecuali membawa clientTxnId
+    //     (idempoten di server), supaya timeout tidak pernah menggandakan
+    //     transaksi.
+    //  8. TIMEOUT ADAPTIF per kelas: AUTH / READ / WRITE / HEAVY.
+    //  9. PRIORITAS: P0 auth/sesi tidak pernah antre; P2 baca dan P3 berat
+    //     dibatasi jumlah serentaknya supaya tidak menjadi badai permintaan.
+    // 10. PEMBATALAN hanya untuk pratinjau "yang terbaru menang" (mis. preview
+    //     No SPB). Login dan seluruh penyimpanan TIDAK PERNAH dibatalkan.
+    // 11. LOG DIAGNOSTIK ringan, default MATI (DEBUG = false). Tidak pernah
+    //     mencatat password, token, maupun isi payload. Aktifkan sementara
+    //     dengan localStorage.setItem('SIGAP_DEBUG','1') atau
+    //     SIGAPGateway.debug(true) dari console.
     // =====================================================================
 
     // URL Web App Apps Script (deployment /exec).
     const GAS_URL = "https://script.google.com/macros/s/AKfycbwwSrisKW7V8-eDqU7is9R78-oitvEmwWwp2JzKf6OsCtBaNejlydCP1RA_nQmgJ-nJ/exec";
 
     window.SIGAPGateway = (function () {
-        // 60 detik: cold start Apps Script bisa 8 detik, dan unggah foto item
-        // (base64) memakan waktu jauh lebih lama daripada permintaan data biasa.
-        const TIMEOUT_DEFAULT = 60000;
-        const inflight = new Map();   // permintaan identik yang sedang berjalan
+        // ---------------- Diagnostik (default mati) ----------------
+        let DEBUG = false;
+        try { if (localStorage.getItem('SIGAP_DEBUG') === '1') DEBUG = true; } catch (e) {}
+        function log(msg) { if (DEBUG) { try { console.log(msg); } catch (e) {} } }
+        function now() { return (window.performance && performance.now) ? performance.now() : Date.now(); }
 
-        function gasError(kode, pesan) {
+        // ---------------- Timeout adaptif per kelas ----------------
+        // AUTH  : cukup untuk cold start Apps Script (+ redirect 302) tanpa
+        //         membuat layar login menggantung terlalu lama.
+        // READ  : baca data biasa.
+        // WRITE : simpan transaksi — lebih longgar, karena jawaban yang
+        //         terpotong timeout justru paling merepotkan di sini.
+        // HEAVY : unggah foto, bootstrap penuh/berat, Smart EXP.
+        const TIMEOUT_AUTH  = 30000;
+        const TIMEOUT_READ  = 45000;
+        const TIMEOUT_WRITE = 60000;
+        const TIMEOUT_HEAVY = 90000;
+        const TIMEOUT_BY_CLASS = { AUTH: TIMEOUT_AUTH, READ: TIMEOUT_READ, WRITE: TIMEOUT_WRITE, HEAVY: TIMEOUT_HEAVY };
+
+        // ---------------- Retry terkontrol ----------------
+        // Jumlah percobaan TOTAL (termasuk yang pertama). Tidak ada retry tak
+        // hingga. WRITE = 1 (tanpa retry) kecuali payload membawa clientTxnId.
+        const MAX_ATTEMPTS = { AUTH: 3, READ: 4, WRITE: 1, HEAVY: 2 };
+        const WRITE_IDEMPOTENT_ATTEMPTS = 3;
+        const BACKOFF_BASE = 500;    // ±500ms -> ±1000ms -> ±2000ms
+        const BACKOFF_MAX  = 4000;
+        // Kode kegagalan yang dianggap SEMENTARA (boleh diulang).
+        const TRANSIENT = {
+            JARINGAN: 1, TIMEOUT: 1, SERVER_SIBUK: 1, KOSONG: 1,
+            HTTP_408: 1, HTTP_429: 1, HTTP_500: 1, HTTP_502: 1, HTTP_503: 1, HTTP_504: 1
+        };
+
+        const inflight = new Map();   // permintaan identik yang sedang berjalan
+        const kanal    = new Map();   // pembatalan "yang terbaru menang"
+
+        function gasError(kode, pesan, extra) {
             const e = new Error(pesan);
             e.code = kode;
+            if (extra) { for (const k in extra) e[k] = extra[k]; }
             return e;
         }
+        function isTransient(err) { return !!(err && TRANSIENT[err.code]); }
 
-        function kirim(action, payload, timeoutMs) {
-            const ac = ('AbortController' in window) ? new AbortController() : null;
-            let timer = null;
-            const batas = timeoutMs || TIMEOUT_DEFAULT;
-
-            const p = new Promise(function (resolve, reject) {
-                timer = setTimeout(function () {
-                    if (ac) { try { ac.abort(); } catch (e) {} }
-                    reject(gasError('TIMEOUT',
-                        'Server belum menjawab dalam ' + Math.round(batas / 1000) + ' detik.'));
-                }, batas);
-
-                fetch(GAS_URL, {
-                    method: 'POST',
-                    // text/plain membuat permintaan ini tergolong "simple request",
-                    // sehingga browser tidak mengirim preflight OPTIONS — Apps
-                    // Script memang tidak bisa menjawab preflight dengan benar.
-                    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-                    body: JSON.stringify({ action: action, data: (payload === undefined ? {} : payload) }),
-                    redirect: 'follow',       // 302 ke googleusercontent.com wajib diikuti
-                    cache: 'no-store',
-                    signal: ac ? ac.signal : undefined
-                })
-                // Dibaca sebagai TEKS lebih dulu. Inilah kunci perbaikan:
-                // respons diperiksa sebelum dicoba diuraikan sebagai JSON.
-                .then(function (res) { return res.text().then(function (txt) { return { res: res, txt: txt }; }); })
-                .then(function (o) {
-                    const awal = (o.txt || '').slice(0, 200).trim().toLowerCase();
-
-                    // Status HTTP diperiksa LEBIH DULU. Halaman login Google
-                    // dibalas dengan status 200 (isinya saja yang HTML), jadi
-                    // urutan ini membuat tiap sebab menghasilkan pesan yang tepat:
-                    // 200 + HTML  -> masalah hak akses deployment
-                    // 500 + HTML  -> error di dalam Apps Script
-                    if (!o.res.ok) {
-                        reject(gasError('HTTP_' + o.res.status,
-                            'Server menolak permintaan (HTTP ' + o.res.status + ').'));
-                        return;
-                    }
-                    if (awal.indexOf('<!doctype') === 0 || awal.indexOf('<html') === 0) {
-                        reject(gasError('BUKAN_JSON',
-                            'Server membalas halaman HTML, bukan data. ' +
-                            'Umumnya deployment Apps Script belum disetel "Who has access: Anyone".'));
-                        return;
-                    }
-                    if (!o.txt) { reject(gasError('KOSONG', 'Server membalas kosong.')); return; }
-                    try { resolve(JSON.parse(o.txt)); }
-                    catch (e) {
-                        reject(gasError('JSON_RUSAK', 'Balasan server tidak dapat dibaca sebagai data.'));
-                    }
-                })
-                .catch(function (err) {
-                    if (err && err.name === 'AbortError') return;     // sudah ditolak oleh timer
-                    if (err && err.code) { reject(err); return; }
-                    // TypeError "Failed to fetch" = jaringan mati, atau Apps Script
-                    // menjawab tanpa header CORS (biasanya halaman error Google).
-                    reject(gasError('JARINGAN',
-                        'Tidak dapat menghubungi server. Periksa koneksi internet.'));
-                });
-            });
-
-            return p.finally(function () { clearTimeout(timer); });
-        }
-
-        /**
-         * Panggil satu fungsi backend. Permintaan identik yang sedang berjalan
-         * DIGABUNG — tidak dikirim dua kali.
-         */
         // -----------------------------------------------------------------
         // [PERF] DETEKSI PANGGILAN TULIS — SATU TITIK, TIDAK BISA TERLEWAT
         // -----------------------------------------------------------------
@@ -260,12 +252,309 @@
         // logout tetap dilakukan secara eksplisit di doLogout().
         const AUTH_ACTIONS = { loginUser: 1, logoutUser: 1, checkSession: 1 };
 
+        // Kelas transport tambahan (hanya memengaruhi timeout/prioritas — BUKAN
+        // deteksi tulis di atas, yang aturannya tetap persis seperti semula).
+        const READ_EXTRA    = { verifyTransaction: 1 };
+        const HEAVY_ACTIONS = { uploadItemImage: 1, getSmartExpRecommendation: 1 };
+        // Pratinjau yang hanya boleh menampilkan jawaban TERBARU. Permintaan
+        // lama dengan payload berbeda dibatalkan dan jawabannya dibuang diam-
+        // diam (handler tidak dipanggil), jadi tidak ada pesan error palsu.
+        const LATEST_WINS   = { peekNextNoSpb: 1 };
+
         function _mungkinMengubahData(action) {
             if (!action) return false;
             if (AUTH_ACTIONS[action]) return false;
             return !BACA_SAJA.test(action);
         }
 
+        function _bootstrapBerat(payload) {
+            // Tanpa `parts` = bootstrap penuh (perilaku lama) -> berat.
+            if (!payload || !payload.parts || !payload.parts.length) return true;
+            if (payload.withImages || payload.withSmartExp) return true;
+            for (let i = 0; i < payload.parts.length; i++) {
+                if (payload.parts[i] !== 'master' && payload.parts[i] !== 'masterStats') return true;
+            }
+            return false;
+        }
+
+        function kelasOf(action, payload) {
+            if (AUTH_ACTIONS[action]) return 'AUTH';
+            if (HEAVY_ACTIONS[action]) return 'HEAVY';
+            if (action === 'getBootstrapData') return _bootstrapBerat(payload) ? 'HEAVY' : 'READ';
+            if (READ_EXTRA[action] || BACA_SAJA.test(action)) return 'READ';
+            return 'WRITE';
+        }
+
+        // P0 AUTH/SESI · P1 MASTER/CORE + aksi tulis user · P2 STOCK/TRANSAKSI/EXP · P3 BERAT
+        function prioritasOf(action, kelas, payload) {
+            if (kelas === 'AUTH') return 0;
+            if (kelas === 'WRITE' || action === 'uploadItemImage') return 1;
+            if (action === 'getMasterData' || action === 'getMasterStats' ||
+                action === 'getBackendInfo' || action === 'verifyTransaction') return 1;
+            if (action === 'getBootstrapData') {
+                if (!_bootstrapBerat(payload)) return 1;
+                if (payload && payload.parts && (payload.withImages || payload.withSmartExp)) return 3;
+                return 2;
+            }
+            if (kelas === 'HEAVY' || action === 'getItemImages') return 3;
+            return 2;
+        }
+
+        // ---------------- Penjadwal prioritas ----------------
+        // P0 & P1 TIDAK PERNAH antre. P2 & P3 dibatasi jumlah serentaknya
+        // sehingga refresh / pindah tab beruntun tidak menjadi badai
+        // permintaan, dan pekerjaan berat tidak pernah menahan auth.
+        const BATAS_SERENTAK = { 2: 4, 3: 2 };
+        const aktif   = { 2: 0, 3: 0 };
+        const antrean = { 2: [], 3: [] };
+        function _lanjutAntrean(prio) {
+            while (antrean[prio].length && aktif[prio] < BATAS_SERENTAK[prio]) antrean[prio].shift()();
+        }
+        function jadwalkan(prio, jalan) {
+            if (!BATAS_SERENTAK[prio]) return jalan();
+            return new Promise(function (resolve, reject) {
+                const tugas = function () {
+                    aktif[prio]++;
+                    let p;
+                    try { p = jalan(); } catch (e) { p = Promise.reject(e); }
+                    p.then(resolve, reject).then(function () { aktif[prio]--; _lanjutAntrean(prio); });
+                };
+                if (aktif[prio] < BATAS_SERENTAK[prio]) tugas(); else antrean[prio].push(tugas);
+            });
+        }
+
+        // ---------------- Status koneksi (UI yang sudah ada) ----------------
+        // Memakai kelas `.snapshot-bar` yang SUDAH ADA (tanpa CSS baru), hanya
+        // untuk permintaan P0–P2. Tidak pernah menghapus sesi / logout.
+        const ConnStatus = (function () {
+            let el = null, hideT = null, mode = '';
+            function _el() {
+                if (!document.body) return null;
+                if (!el) {
+                    el = document.createElement('div');
+                    el.id = 'net-status-bar';
+                    el.className = 'snapshot-bar';
+                    el.setAttribute('role', 'status');
+                    el.setAttribute('aria-live', 'polite');
+                    el.style.zIndex = '10060';   // tetap terlihat di atas layar login
+                    document.body.appendChild(el);
+                }
+                // Jangan menumpuk dengan penanda data tersimpan bila sedang tampil.
+                const snap = document.getElementById('snapshot-bar');
+                el.style.marginBottom = (snap && snap.classList.contains('show')) ? '64px' : '';
+                return el;
+            }
+            function _tampil(m, html, isError, autoHideMs) {
+                const e = _el(); if (!e) return;
+                mode = m;
+                clearTimeout(hideT);
+                e.innerHTML = html;
+                e.classList.toggle('is-error', !!isError);
+                e.classList.add('show');
+                if (autoHideMs) hideT = setTimeout(sembunyi, autoHideMs);
+            }
+            function sembunyi() { clearTimeout(hideT); mode = ''; if (el) el.classList.remove('show'); }
+            return {
+                mencoba: function () {
+                    _tampil('retry', '<i class="ph ph-arrows-clockwise"></i><span>Mencoba menghubungkan kembali…</span>', false, 0);
+                },
+                pulih: function () {
+                    if (mode !== 'retry' && mode !== 'fail') return;
+                    _tampil('ok', '<i class="ph ph-check-circle"></i><span>Koneksi kembali normal.</span>', false, 2500);
+                },
+                gagal: function () {
+                    _tampil('fail', '<i class="ph ph-wifi-slash"></i><span>Server belum dapat dihubungi. Silakan coba lagi.</span>', true, 7000);
+                },
+                sembunyi: sembunyi
+            };
+        })();
+
+        /** Tidur yang bisa dibangunkan lebih awal oleh event `online` atau dibatalkan. */
+        function tidur(ms, signal) {
+            return new Promise(function (resolve, reject) {
+                let t = null;
+                const selesai = function () {
+                    clearTimeout(t);
+                    window.removeEventListener('online', selesai);
+                    if (signal) signal.removeEventListener('abort', batal);
+                    resolve();
+                };
+                const batal = function () {
+                    clearTimeout(t);
+                    window.removeEventListener('online', selesai);
+                    reject(gasError('DIBATALKAN', 'Permintaan digantikan permintaan yang lebih baru.'));
+                };
+                t = setTimeout(selesai, ms);
+                window.addEventListener('online', selesai);
+                if (signal) signal.addEventListener('abort', batal);
+            });
+        }
+
+        function backoff(attempt) {
+            const dasar = Math.min(BACKOFF_MAX, BACKOFF_BASE * Math.pow(2, attempt - 1));
+            return Math.round(dasar * (0.7 + Math.random() * 0.6));   // jitter ±30%
+        }
+
+        /**
+         * Satu kali kirim. Resolve { status, data } atau reject Error ber-kode.
+         * Urutan: response -> text -> validasi HTTP -> deteksi HTML -> parse JSON.
+         */
+        function kirim(action, payload, timeoutMs, extSignal) {
+            const ac = ('AbortController' in window) ? new AbortController() : null;
+            let timer = null, dibatalkan = false;
+            const batas = timeoutMs || TIMEOUT_WRITE;
+            const onAbortLuar = function () {
+                dibatalkan = true;
+                if (ac) { try { ac.abort(); } catch (e) {} }
+            };
+
+            const p = new Promise(function (resolve, reject) {
+                if (extSignal) {
+                    if (extSignal.aborted) { reject(gasError('DIBATALKAN', 'Permintaan dibatalkan.')); return; }
+                    extSignal.addEventListener('abort', function () {
+                        onAbortLuar();
+                        reject(gasError('DIBATALKAN', 'Permintaan digantikan permintaan yang lebih baru.'));
+                    });
+                }
+                // Browser sudah tahu sedang offline: jangan menunggu timeout penuh.
+                if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+                    reject(gasError('JARINGAN', 'Perangkat sedang offline. Periksa koneksi internet.'));
+                    return;
+                }
+
+                timer = setTimeout(function () {
+                    if (ac) { try { ac.abort(); } catch (e) {} }
+                    reject(gasError('TIMEOUT',
+                        'Server belum menjawab dalam ' + Math.round(batas / 1000) + ' detik.'));
+                }, batas);
+
+                fetch(GAS_URL, {
+                    method: 'POST',
+                    // text/plain membuat permintaan ini tergolong "simple request",
+                    // sehingga browser tidak mengirim preflight OPTIONS — Apps
+                    // Script memang tidak bisa menjawab preflight dengan benar.
+                    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+                    body: JSON.stringify({ action: action, data: (payload === undefined ? {} : payload) }),
+                    redirect: 'follow',       // 302 ke googleusercontent.com wajib diikuti
+                    cache: 'no-store',
+                    signal: ac ? ac.signal : undefined
+                })
+                // Dibaca sebagai TEKS lebih dulu. Inilah kunci perbaikan:
+                // respons diperiksa sebelum dicoba diuraikan sebagai JSON.
+                .then(function (res) { return res.text().then(function (txt) { return { res: res, txt: txt }; }); })
+                .then(function (o) {
+                    const status = o.res.status;
+                    const awal = (o.txt || '').slice(0, 200).trim().toLowerCase();
+                    const isHtml = awal.indexOf('<!doctype') === 0 || awal.indexOf('<html') === 0;
+
+                    // Status HTTP diperiksa LEBIH DULU. Halaman login Google
+                    // dibalas dengan status 200 (isinya saja yang HTML), jadi
+                    // urutan ini membuat tiap sebab menghasilkan pesan yang tepat:
+                    // 200 + HTML  -> masalah hak akses deployment
+                    // 500 + HTML  -> error di dalam Apps Script
+                    if (!o.res.ok) {
+                        reject(gasError('HTTP_' + status,
+                            'Server menolak permintaan (HTTP ' + status + ').',
+                            { status: status, type: isHtml ? 'SERVER_HTML_RESPONSE' : 'HTTP_ERROR' }));
+                        return;
+                    }
+                    if (isHtml) {
+                        // Halaman "server sibuk / coba lagi" dari Google bersifat
+                        // sementara; selain itu (login Google, file tidak dapat
+                        // dibuka) adalah masalah setelan deployment.
+                        const potongan = (o.txt || '').slice(0, 6000);
+                        if (/too many|temporar|server error occurred|service unavailable|rate limit|quota/i.test(potongan) &&
+                            !/servicelogin|accounts\.google\.com/i.test(potongan)) {
+                            reject(gasError('SERVER_SIBUK',
+                                'Server Apps Script sedang sibuk. Mencoba lagi…',
+                                { status: status, type: 'SERVER_HTML_RESPONSE' }));
+                            return;
+                        }
+                        reject(gasError('BUKAN_JSON',
+                            'Server membalas halaman HTML, bukan data. ' +
+                            'Umumnya deployment Apps Script belum disetel "Who has access: Anyone".',
+                            { status: status, type: 'DEPLOYMENT_ACCESS_ERROR' }));
+                        return;
+                    }
+                    if (!o.txt) { reject(gasError('KOSONG', 'Server membalas kosong.', { status: status })); return; }
+                    let data;
+                    try { data = JSON.parse(o.txt); }
+                    catch (e) {
+                        reject(gasError('JSON_RUSAK', 'Balasan server tidak dapat dibaca sebagai data.',
+                            { status: status, type: 'INVALID_JSON' }));
+                        return;
+                    }
+                    resolve({ status: status, data: data });
+                })
+                .catch(function (err) {
+                    if (err && err.name === 'AbortError') {
+                        if (dibatalkan) reject(gasError('DIBATALKAN', 'Permintaan dibatalkan.'));
+                        return;                                         // timeout: sudah ditolak oleh timer
+                    }
+                    if (err && err.code) { reject(err); return; }
+                    // TypeError "Failed to fetch" = jaringan mati, atau Apps Script
+                    // menjawab tanpa header CORS (biasanya halaman error Google).
+                    reject(gasError('JARINGAN',
+                        'Tidak dapat menghubungi server. Periksa koneksi internet.'));
+                });
+            });
+
+            return p.finally(function () { clearTimeout(timer); });
+        }
+
+        /** Kirim dengan retry transient + exponential backoff + jitter. */
+        function kirimDenganRetry(action, payload, kelas, prio, opts) {
+            let maks = opts.attempts || MAX_ATTEMPTS[kelas] || 1;
+            if (kelas === 'WRITE') {
+                // Tulis tanpa penanda idempotensi TIDAK PERNAH diulang otomatis:
+                // permintaan yang timeout bisa saja sudah tersimpan di server.
+                maks = (payload && payload.clientTxnId) ? WRITE_IDEMPOTENT_ATTEMPTS : 1;
+            }
+            const batas = opts.timeout || TIMEOUT_BY_CLASS[kelas] || TIMEOUT_WRITE;
+            const tampilStatus = prio <= 2;
+            let percobaan = 0, jumlahTimeout = 0;
+            const tMulai = now();
+
+            const coba = function () {
+                percobaan++;
+                const t0 = now();
+                return kirim(action, payload, batas, opts.signal).then(function (o) {
+                    const ok = !(o.data && o.data.success === false);
+                    log('[SIGAP][' + action + '] attempt=' + percobaan + ' duration=' + Math.round(now() - t0) +
+                        'ms status=' + o.status + ' result=' + (ok ? 'ok' : 'app-fail') +
+                        (percobaan > 1 ? ' total=' + Math.round(now() - tMulai) + 'ms' : ''));
+                    if (percobaan > 1 && tampilStatus) ConnStatus.pulih();
+                    return o.data;
+                }, function (err) {
+                    log('[SIGAP][' + action + '] attempt=' + percobaan + ' duration=' + Math.round(now() - t0) +
+                        'ms status=' + (err.status || '-') + ' result=' + (err.code || 'ERROR'));
+                    if (err.code === 'DIBATALKAN') throw err;
+                    if (err.code === 'TIMEOUT') jumlahTimeout++;
+                    // Setelah satu timeout, paling banyak SATU percobaan lagi —
+                    // supaya timeout panjang tidak berlipat-lipat.
+                    const bolehUlang = isTransient(err) && percobaan < maks &&
+                                       !(err.code === 'TIMEOUT' && jumlahTimeout > 1);
+                    if (bolehUlang) {
+                        if (tampilStatus) ConnStatus.mencoba();
+                        const jeda = backoff(percobaan);
+                        log('[SIGAP][' + action + '] retry in ' + jeda + 'ms (' + err.code + ')');
+                        return tidur(jeda, opts.signal).then(coba);
+                    }
+                    err.attempts = percobaan;
+                    if (isTransient(err) && tampilStatus) ConnStatus.gagal();
+                    throw err;
+                });
+            };
+            return coba();
+        }
+
+        /**
+         * Panggil satu fungsi backend. Permintaan identik yang sedang berjalan
+         * DIGABUNG — tidak dikirim dua kali.
+         *   opts.timeout  — override timeout per percobaan (ms)
+         *   opts.attempts — override jumlah percobaan (bukan untuk WRITE)
+         *   opts.signal   — AbortSignal untuk pembatalan (hanya baca non-kritis)
+         */
         function call(action, payload, opts) {
             opts = opts || {};
 
@@ -278,74 +567,234 @@
             }
 
             let kunci = null;
-            try { kunci = action + '|' + JSON.stringify(payload === undefined ? null : payload); } catch (e) { kunci = null; }
+            try {
+                // Password TIDAK ikut kunci penggabungan (kunci hidup di memori saja,
+                // tetapi tetap tidak perlu membawa kredensial).
+                const bahanKunci = (action === 'loginUser' && payload)
+                    ? { username: payload.username } : (payload === undefined ? null : payload);
+                kunci = action + '|' + JSON.stringify(bahanKunci);
+            } catch (e) { kunci = null; }
 
-            if (kunci && inflight.has(kunci)) return inflight.get(kunci);
+            if (kunci && inflight.has(kunci)) {
+                log('[SIGAP][' + action + '] dedup: memakai permintaan yang sedang berjalan');
+                return inflight.get(kunci);
+            }
 
-            const p = kirim(action, payload, opts.timeout);
+            // Pratinjau "yang terbaru menang": batalkan pendahulu yang berbeda payload.
+            let lokal = null;
+            if (LATEST_WINS[action] && !opts.signal && 'AbortController' in window) {
+                const lama = kanal.get(action);
+                if (lama && lama.kunci !== kunci) { try { lama.ac.abort(); } catch (e) {} }
+                lokal = { kunci: kunci, ac: new AbortController() };
+                kanal.set(action, lokal);
+                opts = Object.assign({}, opts, { signal: lokal.ac.signal });
+            }
+
+            const kelas = kelasOf(action, payload);
+            const prio  = prioritasOf(action, kelas, payload);
+            const p = jadwalkan(prio, function () { return kirimDenganRetry(action, payload, kelas, prio, opts); });
             if (kunci) {
                 inflight.set(kunci, p);
                 p.then(function () { inflight.delete(kunci); },
                        function () { inflight.delete(kunci); });
             }
+            if (lokal) {
+                p.then(function () { if (kanal.get(action) === lokal) kanal.delete(action); },
+                       function () { if (kanal.get(action) === lokal) kanal.delete(action); });
+            }
             return p;
         }
 
-        return { call: call, url: function () { return GAS_URL; } };
-    })();
+        // ---------------------------------------------------------------------
+        // PEMASANGAN google.script.* — NATIVE BILA ADA, GATEWAY BILA TIDAK.
+        // ---------------------------------------------------------------------
+        let _mode = 'gateway';
 
-    // ---------------------------------------------------------------------
-    // Jembatan google.script.* — supaya seluruh kode aplikasi tidak perlu diubah.
-    // ---------------------------------------------------------------------
-    window.google = window.google || {};
-    window.google.script = {
-        get run() {
-            let okCb = null, failCb = null;
+        /** Runner bergaya google.script.run di atas SIGAPGateway (GitHub Pages). */
+        function runnerGateway() {
+            let okCb = null, failCb = null, uo, adaUo = false;
             const proxy = new Proxy({}, {
                 get: function (target, prop) {
                     // `return proxy`, BUKAN `return this` — tetap benar walau
                     // dipanggil lewat .call()/.apply() seperti yang dilakukan SIGAPNet.
                     if (prop === 'withSuccessHandler') return function (cb) { okCb = cb; return proxy; };
                     if (prop === 'withFailureHandler') return function (cb) { failCb = cb; return proxy; };
+                    if (prop === 'withUserObject')     return function (o)  { uo = o; adaUo = true; return proxy; };
                     if (typeof prop !== 'string') return undefined;
                     return function (payload) {
-                        window.SIGAPGateway.call(prop, payload)
+                        call(prop, payload)
                             .then(function (data) {
                                 if (!okCb) return;
                                 // Error DI DALAM handler sukses adalah bug render,
                                 // bukan kegagalan koneksi. Dilempar ulang secara
                                 // asinkron supaya tetap terlihat di console, tanpa
                                 // pernah dibelokkan ke handler gagal.
-                                try { okCb(data); }
+                                try { adaUo ? okCb(data, uo) : okCb(data); }
                                 catch (e) { setTimeout(function () { throw e; }, 0); }
                             })
                             .catch(function (err) {
-                                if (failCb) failCb(err);
+                                // Digantikan permintaan yang lebih baru: buang diam-diam.
+                                if (err && err.code === 'DIBATALKAN') return;
+                                if (failCb) { adaUo ? failCb(err, uo) : failCb(err); }
                                 else console.error('[SIGAP] ' + prop + ' gagal:', err && err.message);
                             });
                     };
                 }
             });
             return proxy;
-        },
-        // Di GitHub Pages halaman berjalan sebagai halaman biasa (bukan iframe
-        // sandbox Apps Script), jadi alamatnya cukup diambil dari location.
-        url: {
-            getLocation: function (cb) {
-                if (typeof cb !== 'function') return;
-                let param = {}, params = {};
-                try {
-                    new URLSearchParams(location.search).forEach(function (v, k) {
-                        param[k] = v;
-                        (params[k] = params[k] || []).push(v);
-                    });
-                } catch (e) {}
-                cb({ hash: (location.hash || '').replace(/^#/, ''), parameter: param, parameters: params, href: location.href });
+        }
+
+        /** Pasang jembatan gateway (GitHub Pages / hosting statis). */
+        function pasangGateway() {
+            window.google = window.google || {};
+            window.google.script = {
+                get run() { return runnerGateway(); },
+                // Di GitHub Pages halaman berjalan sebagai halaman biasa (bukan iframe
+                // sandbox Apps Script), jadi alamatnya cukup diambil dari location.
+                url: {
+                    getLocation: function (cb) {
+                        if (typeof cb !== 'function') return;
+                        let param = {}, params = {};
+                        try {
+                            new URLSearchParams(location.search).forEach(function (v, k) {
+                                param[k] = v;
+                                (params[k] = params[k] || []).push(v);
+                            });
+                        } catch (e) {}
+                        cb({ hash: (location.hash || '').replace(/^#/, ''), parameter: param, parameters: params, href: location.href });
+                    }
+                },
+                host: { close: function () {}, setWidth: function () {}, setHeight: function () {},
+                        origin: location.origin, editor: { focus: function () {} } }
+            };
+            _mode = 'gateway';
+        }
+
+        /**
+         * Bungkus google.script.run BAWAAN (Apps Script HTML). Transport tetap
+         * native; yang ditambahkan hanya kait deteksi-tulis (pembuangan foto
+         * SIGAPCache) dan log diagnostik. Tanpa dedup/retry di sini, supaya
+         * perilaku native tidak berubah sama sekali. Bila pembungkusan gagal
+         * (objek bawaan tidak bisa diganti), google.script bawaan dibiarkan.
+         */
+        function pasangNative(asli) {
+            const runnerNative = function () {
+                let okCb = null, failCb = null, uo, adaUo = false;
+                const proxy = new Proxy({}, {
+                    get: function (target, prop) {
+                        if (prop === 'withSuccessHandler') return function (cb) { okCb = cb; return proxy; };
+                        if (prop === 'withFailureHandler') return function (cb) { failCb = cb; return proxy; };
+                        if (prop === 'withUserObject')     return function (o)  { uo = o; adaUo = true; return proxy; };
+                        const base = asli.run;
+                        if (typeof prop !== 'string' || typeof base[prop] !== 'function') return base[prop];
+                        return function () {
+                            if (_mungkinMengubahData(prop)) {
+                                try { if (window.__sigapOnWrite) window.__sigapOnWrite(prop); } catch (e) {}
+                            }
+                            let r = asli.run;
+                            let ok = okCb, fail = failCb;
+                            if (DEBUG) {
+                                const t0 = now();
+                                if (ok)   { const o0 = ok;   ok   = function (a, b) { log('[SIGAP][' + prop + '] native duration=' + Math.round(now() - t0) + 'ms result=' + (a && a.success === false ? 'app-fail' : 'ok')); return o0(a, b); }; }
+                                if (fail) { const f0 = fail; fail = function (a, b) { log('[SIGAP][' + prop + '] native duration=' + Math.round(now() - t0) + 'ms result=ERROR'); return f0(a, b); }; }
+                            }
+                            if (ok)    r = r.withSuccessHandler(ok);
+                            if (fail)  r = r.withFailureHandler(fail);
+                            if (adaUo) r = r.withUserObject(uo);
+                            return r[prop].apply(r, arguments);
+                        };
+                    }
+                });
+                return proxy;
+            };
+            const bungkus = {};
+            try { Object.keys(asli).forEach(function (k) { if (k !== 'run') bungkus[k] = asli[k]; }); } catch (e) {}
+            if (!bungkus.url && asli.url)   bungkus.url  = asli.url;
+            if (!bungkus.host && asli.host) bungkus.host = asli.host;
+            if (!bungkus.history && asli.history) bungkus.history = asli.history;
+            Object.defineProperty(bungkus, 'run', { get: runnerNative, enumerable: true, configurable: true });
+            try { window.google.script = bungkus; } catch (e) {}
+            _mode = 'native';
+            return window.google.script === bungkus;
+        }
+
+        const _dalamAppsScript = /(^|\.)googleusercontent\.com$/i.test(location.hostname || '');
+        let _terpasang = false;
+        function pasang() {
+            if (_terpasang) return;
+            const g = window.google;
+            if (g && g.script && g.script.run) {
+                pasangNative(g.script);
+                _terpasang = true;
+            } else if (!_dalamAppsScript) {
+                pasangGateway();
+                _terpasang = true;
             }
-        },
-        host: { close: function () {}, setWidth: function () {}, setHeight: function () {},
-                origin: location.origin, editor: { focus: function () {} } }
-    };
+            // Di sandbox Apps Script tetapi google.script belum tersedia:
+            // JANGAN dipasang gateway — dicoba lagi saat DOMContentLoaded.
+        }
+        pasang();
+        if (!_terpasang) {
+            document.addEventListener('DOMContentLoaded', function () {
+                pasang();
+                // Jaring pengaman terakhir: tanpa transport sama sekali aplikasi
+                // tidak bisa apa-apa, jadi gateway tetap dipasang.
+                if (!_terpasang) { pasangGateway(); _terpasang = true; }
+            });
+        }
+
+        return {
+            call: call,
+            url: function () { return GAS_URL; },
+            mode: function () { return _mode; },
+            isTransient: isTransient,
+            status: ConnStatus,
+            debug: function (on) {
+                DEBUG = !!on;
+                try { on ? localStorage.setItem('SIGAP_DEBUG', '1') : localStorage.removeItem('SIGAP_DEBUG'); } catch (e) {}
+                return DEBUG;
+            },
+            isDebug: function () { return DEBUG; },
+            TIMEOUT: { AUTH: TIMEOUT_AUTH, READ: TIMEOUT_READ, WRITE: TIMEOUT_WRITE, HEAVY: TIMEOUT_HEAVY }
+        };
+    })();
+
+    // ---------------------------------------------------------------------
+    // [PERF] SIGAPPerf — BENCHMARK INTERNAL (tanpa mengubah perilaku)
+    // ---------------------------------------------------------------------
+    // Mengukur login / sesi / bootstrap per fase / render, supaya bottleneck
+    // bisa dibedakan: jaringan+Apps Script (durasi permintaan) vs browser
+    // (durasi render). Hasil selalu bisa dilihat lewat SIGAPPerf.report();
+    // dicetak ke console hanya bila DEBUG aktif.
+    window.SIGAPPerf = (function () {
+        const marks = {}, hasil = {};
+        function now() { return (window.performance && performance.now) ? performance.now() : Date.now(); }
+        function dbg() { return !!(window.SIGAPGateway && SIGAPGateway.isDebug()); }
+        function mark(nama) { marks[nama] = now(); }
+        function record(label, ms) {
+            hasil[label] = Math.round(ms);
+            if (dbg()) { try { console.log('[SIGAP][perf] ' + label + ': ' + (ms / 1000).toFixed(2) + 's'); } catch (e) {} }
+            return ms;
+        }
+        function measure(label, dari) {
+            if (marks[dari] == null) return null;
+            return record(label, now() - marks[dari]);
+        }
+        function time(label, fn) {
+            const t0 = now();
+            try { return fn(); } finally { record(label, now() - t0); }
+        }
+        function report() { return Object.assign({}, hasil); }
+        function summary() {
+            if (!dbg()) return;
+            try {
+                console.log('[SIGAP][perf] ' + Object.keys(hasil).map(function (k) {
+                    return k + ': ' + (hasil[k] / 1000).toFixed(2) + 's';
+                }).join(' | '));
+            } catch (e) {}
+        }
+        return { mark: mark, measure: measure, record: record, time: time, report: report, summary: summary };
+    })();
 </script>
     <style>
         /* ============================================================
@@ -15099,6 +15548,28 @@ const sorted = [...data].sort((a, b) => {
              */
             function call(fn, args, opts) {
                 opts = opts || {};
+
+                // [TRANSPORT v2] Mode GitHub Pages: SIGAPGateway SUDAH menangani
+                // timeout per kelas, retry khusus gangguan sesaat (backoff +
+                // jitter), dan penggabungan permintaan kembar. Membungkusnya lagi
+                // dengan timer + retry di sini justru berbahaya: timer SIGAPNet
+                // yang lebih pendek "mengulang" permintaan yang sebenarnya masih
+                // berjalan, dan retry berlapis melipatgandakan waktu tunggu.
+                // Jadi di mode gateway SIGAPNet hanya meneruskan, lalu memutuskan
+                // dialog pemulihan dari kode error yang sudah tegas.
+                // Mode Apps Script (google.script.run bawaan) tetap memakai
+                // jalur di bawah, PERSIS seperti sebelumnya.
+                if (window.SIGAPGateway && SIGAPGateway.mode() === 'gateway') {
+                    return SIGAPGateway.call(fn, (args || [])[0]).catch(function (err) {
+                        if (_isTransportBreak(err)) {
+                            if (opts.onRecover !== false) showRecovery('Server menjawab dengan halaman HTML, bukan data.');
+                        } else if (err && err.code === 'TIMEOUT' && opts.onRecover === true) {
+                            showRecovery('Server tidak menjawab setelah beberapa kali percobaan.');
+                        }
+                        throw err;
+                    });
+                }
+
                 const timeout  = opts.timeout  || 45000;
                 const attempts = (opts.attempts == null) ? 2 : opts.attempts;
                 const params   = args || [];
@@ -15152,7 +15623,8 @@ const sorted = [...data].sort((a, b) => {
                 });
             }
 
-            return { call: call, showRecovery: showRecovery, execUrl: function () { return _execUrl; } };
+            return { call: call, showRecovery: showRecovery, isTransportBreak: _isTransportBreak,
+                     execUrl: function () { return _execUrl; } };
         })();
 
         // ===================== AUTH & ROLE =====================
@@ -15224,38 +15696,68 @@ const sorted = [...data].sort((a, b) => {
             return false;
         }
 
-        // =====================================================================
-        // [PERF] PREFETCH BOOTSTRAP — DUA PERMINTAAN DIJALANKAN BERBARENGAN
-        // ---------------------------------------------------------------------
-        // Sebelumnya boot aplikasi berjalan BERURUTAN:
-        //     checkSession (2-4 dtk)  ->  baru  getBootstrapData (2-8 dtk)
-        // Totalnya 5-12 detik menatap layar kosong, padahal permintaan kedua
-        // TIDAK membutuhkan hasil permintaan pertama — keduanya hanya perlu
-        // token yang sama, dan token itu sudah ada di tangan sejak detik nol.
-        //
-        // Sekarang keduanya ditembakkan bersamaan, jadi total tunggu tinggal
-        // selama yang paling lambat saja (2-8 dtk), bukan jumlah keduanya.
-        //
-        // Bila ternyata sesi TIDAK berlaku, hasil prefetch cukup dibuang.
-        // Ongkosnya satu permintaan terbuang pada kasus yang jarang terjadi —
-        // jauh lebih murah daripada menambah 2-4 detik pada SETIAP kali buka.
-        // Keamanan tidak berubah: backend tetap memverifikasi token pada
-        // getBootstrapData, jadi prefetch dengan token kedaluwarsa tidak
-        // mengembalikan data apa pun.
-        // =====================================================================
         let _bootPrefetch = null;
         let _bootPrefetchEpoch = 0;
 
+        // [LOGIN v2] Status alur autentikasi — semuanya hanya di memori.
+        // Tidak ada password / hash / kredensial yang disimpan di mana pun;
+        // token tetap memakai lapisan penyimpanan yang sudah ada.
+        let _appStarted        = false;   // _startApp() hanya sekali per sesi
+        let _sessionPromise    = null;    // single-flight checkSession
+        let _loginInflight     = false;   // cegah login ganda (klik + Enter)
+        let _sessionRetryTimer = null;    // cek ulang sesi terkontrol saat jaringan gagal
+        let _sessionRetryIdx   = 0;
+        const SESSION_RETRY_DELAYS = [5000, 10000, 20000, 30000, 60000];
+
+        // [PERF] Bootstrap bertahap — kontrak getBootstrapData TIDAK berubah,
+        // hanya memakai parameter `parts` yang memang sudah disediakan backend.
+        const BOOT_P1_PARTS = ['master', 'masterStats'];     // KRITIS: UI bisa dipakai
+        const BOOT_P2_PARTS = ['stock', 'outbound', 'exp'];  // SEKUNDER
+        const BOOT_P3_PARTS = ['heavy'];                     // BERAT/LATAR (+ withImages/withSmartExp)
+
+        /**
+         * Satu fase getBootstrapData. Fase 2/3 tidak pernah memunculkan dialog
+         * "Sambungan Terputus" — kegagalan data sekunder/berat tidak boleh
+         * mengganggu user yang sudah bisa bekerja (isolasi kegagalan).
+         */
+        function _callBootstrapPhase(phase, start, opts) {
+            opts = opts || {};
+            const payload = { startDate: start };
+            if (phase === 1)      payload.parts = BOOT_P1_PARTS;
+            else if (phase === 2) payload.parts = BOOT_P2_PARTS;
+            else {
+                payload.parts = BOOT_P3_PARTS;
+                payload.withImages = true; payload.withSmartExp = true; payload.horizonDays = 60;
+            }
+            return SIGAPNet.call('getBootstrapData', [_withAuth(payload)], {
+                timeout: phase === 1 ? 45000 : 90000,
+                attempts: 2,
+                onRecover: phase === 1 && opts.onRecover !== false
+            });
+        }
+
+        // =====================================================================
+        // [PERF] PREFETCH BOOTSTRAP — BERBARENGAN DENGAN checkSession
+        // ---------------------------------------------------------------------
+        // Sebelumnya boot aplikasi berjalan BERURUTAN:
+        //     checkSession (2-4 dtk)  ->  baru  getBootstrapData (2-8 dtk)
+        // Prefetch membuat keduanya berjalan bersamaan.
+        //
+        // [LOGIN v2] Yang di-prefetch kini HANYA FASE 1 (master + statistik SKU,
+        // keduanya ber-cache di backend). Permintaan sesi (P0) tidak lagi
+        // berbarengan dengan kalkulasi berat stock/EXP/foto/Smart EXP, dan bila
+        // sesi ternyata tidak berlaku, yang terbuang hanya permintaan ringan.
+        // Data sekunder & berat baru diminta SETELAH sesi dipastikan valid.
+        // =====================================================================
         function _prefetchBootstrap() {
             try {
                 _bootPrefetchEpoch = _writeEpoch;
+                SIGAPPerf.mark('boot_p1_start');
                 // onRecover: false — dialog "Sambungan Terputus" tidak boleh
                 // muncul dari permintaan spekulatif ini, karena bisa menimpa
                 // layar login saat sesinya memang sudah habis. Bila prefetch
                 // gagal, _bootstrapData() mengulanginya dengan pemulihan aktif.
-                _bootPrefetch = SIGAPNet.call('getBootstrapData',
-                    [_withAuth({ startDate: _currentMonthStart(), withImages: true, withSmartExp: true, horizonDays: 60 })],
-                    { timeout: 90000, attempts: 2, onRecover: false });
+                _bootPrefetch = _callBootstrapPhase(1, _currentMonthStart(), { onRecover: false });
                 // Penangan kosong: mencegah "unhandled rejection" bila sesi
                 // ternyata tidak berlaku dan hasilnya tidak pernah dipakai.
                 _bootPrefetch.catch(function () {});
@@ -15265,12 +15767,103 @@ const sorted = [...data].sort((a, b) => {
         }
 
         function initAuth() {
+            SIGAPPerf.mark('app_open');
             const token = _authToken();
             if (!token) return _showLoginScreen();
             showLoader(true);
-            _prefetchBootstrap();     // jalan BERBARENGAN dengan checkSession di bawah
+            _prefetchBootstrap();     // fase 1 (ringan) berbarengan dengan checkSession
             _verifySession(token);
         }
+
+        /**
+         * [SESSION] Single-flight: bila checkSession sedang berjalan, semua
+         * pemanggil memakai Promise yang SAMA — tidak pernah ada dua
+         * checkSession bersamaan.
+         */
+        function _ensureSession(token) {
+            if (_sessionPromise) return _sessionPromise;
+            SIGAPPerf.mark('session_start');
+            const p = SIGAPNet.call('checkSession', [token], { timeout: 15000, attempts: 3, onRecover: false });
+            _sessionPromise = p;
+            const lepas = () => { if (_sessionPromise === p) _sessionPromise = null; };
+            p.then(res => { SIGAPPerf.measure('SESSION', 'session_start'); lepas(); }, lepas);
+            return p;
+        }
+
+        /** Pesan status di layar login (memakai elemen #login-error yang sudah ada). */
+        function _loginStatus(text, kind) {
+            const el = document.getElementById('login-error');
+            if (!el) return;
+            if (!text) {
+                if (el.getAttribute('data-sigap-status') === '1') { el.textContent = ''; el.style.display = 'none'; }
+                el.removeAttribute('data-sigap-status');
+                el.style.color = 'var(--red)';
+                return;
+            }
+            el.textContent = text;
+            el.style.color = (kind === 'info') ? 'var(--text-muted)' : 'var(--red)';
+            el.setAttribute('data-sigap-status', '1');
+            el.style.display = 'block';
+        }
+
+        function _stopSessionRetry() {
+            clearTimeout(_sessionRetryTimer);
+            _sessionRetryTimer = null;
+            _sessionRetryIdx = 0;
+        }
+
+        /**
+         * [SESSION] Server TIDAK dapat dihubungi saat memeriksa sesi (bukan
+         * "sesi habis"). Token DIPERTAHANKAN, layar login ditampilkan sebagai
+         * cadangan, dan sesi dicek ulang di latar dengan jeda bertambah. Begitu
+         * server menjawab "sesi valid", aplikasi terbuka sendiri tanpa login ulang.
+         */
+        function _onSessionNetworkFail(token, loginSudahTampil) {
+            if (!loginSudahTampil) _showLoginScreen();
+            if (_sessionRetryIdx >= SESSION_RETRY_DELAYS.length) {
+                _loginStatus('Server belum dapat dihubungi. Silakan coba lagi.', 'error');
+                _stopSessionRetry();
+                return;
+            }
+            _loginStatus('Server belum dapat dihubungi. Sesi Anda tetap tersimpan — mencoba menghubungkan kembali…', 'info');
+            const jeda = SESSION_RETRY_DELAYS[_sessionRetryIdx++];
+            clearTimeout(_sessionRetryTimer);
+            _sessionRetryTimer = setTimeout(() => { _sessionRetryTimer = null; _runSessionRetry(token); }, jeda);
+        }
+
+        /** Satu kali cek ulang sesi di latar (dipakai jadwal backoff & event online). */
+        function _runSessionRetry(token) {
+            // Berhenti bila user sudah masuk, sudah login ulang, atau logout.
+            if (_appStarted || _authToken() !== token) { _stopSessionRetry(); return; }
+            _ensureSession(token)
+                .then(res => {
+                    if (_appStarted || _authToken() !== token) return;
+                    if (res && res.success) {
+                        _stopSessionRetry(); _loginStatus('');
+                        currentUser = res.user;
+                        _startApp();
+                        return;
+                    }
+                    if (res && res.sessionInvalid) {
+                        clearAuthToken(); _stopSessionRetry(); _loginStatus('');
+                        return;
+                    }
+                    _onSessionNetworkFail(token, true);
+                })
+                .catch(() => {
+                    if (_appStarted || _authToken() !== token) return;
+                    _onSessionNetworkFail(token, true);
+                });
+        }
+        // Koneksi kembali: jalankan cek ulang yang sedang menunggu SEKARANG JUGA.
+        window.addEventListener('online', () => {
+            if (!_sessionRetryTimer || _appStarted) return;
+            const token = _authToken();
+            if (!token) return;
+            clearTimeout(_sessionRetryTimer);
+            _sessionRetryTimer = null;
+            _runSessionRetry(token);
+        });
 
         /**
          * [UPGRADE] Verifikasi sesi permanen.
@@ -15281,44 +15874,52 @@ const sorted = [...data].sort((a, b) => {
          * tetap tersimpan supaya sesi pulih sendiri saat aplikasi dibuka lagi.
          */
         function _verifySession(token) {
-            // [FIX LOGIN LAMBAT] Dulu: setiap sesi yang sudah habis SELALU melewati
-            // 3x percobaan berjeda 1,5 detik sebelum layar login muncul — karena
-            // backend tidak pernah mengirim penanda `sessionInvalid`, sehingga
-            // jawaban tegas "sesi habis" tidak bisa dibedakan dari gangguan
-            // koneksi. Backend kini mengirim penanda itu, jadi jawaban pasti
-            // langsung ditindaklanjuti, dan percobaan ulang hanya dipakai untuk
-            // gangguan koneksi yang sesungguhnya (persis maksud semula).
+            // [FIX LOGIN LAMBAT] Jawaban pasti "sesi habis" (sessionInvalid)
+            // langsung ditindaklanjuti; percobaan ulang hanya dipakai untuk
+            // gangguan koneksi yang sesungguhnya.
             let loginSudahTampil = false;
 
-            // Jaring pengaman: kalau server menggantung tanpa jawaban, jangan
-            // biarkan user menatap loader kosong tanpa batas.
+            // Jaring pengaman: kalau server lambat (cold start), jangan biarkan
+            // user menatap loader. Layar login ditampilkan DENGAN keterangan
+            // bahwa sesi sedang dipulihkan — bukan kesan "sesi habis".
             const revealLogin = setTimeout(() => {
+                if (_appStarted) return;
                 loginSudahTampil = true;
                 showLoader(false);
                 _showLoginScreen();          // token sengaja TIDAK dihapus
+                _loginStatus('Memulihkan sesi sebelumnya…', 'info');
             }, 2500);
 
-            SIGAPNet.call('checkSession', [token], { timeout: 15000, attempts: 3, onRecover: true })
+            _ensureSession(token)
                 .then(res => {
                     clearTimeout(revealLogin);
+                    showLoader(false);
+                    if (_appStarted) return;          // user sudah masuk lewat form login
                     if (res && res.success) {
-                        showLoader(false);
+                        _stopSessionRetry(); _loginStatus('');
                         currentUser = res.user;
                         _startApp();          // _startApp() menyembunyikan layar login
                         return;
                     }
-                    // Server MEMASTIKAN sesi tidak berlaku -> buang token, tampilkan
-                    // login sekarang juga. Tidak ada lagi jeda percobaan ulang.
-                    if (res && res.sessionInvalid) clearAuthToken();
-                    showLoader(false);
-                    if (!loginSudahTampil) _showLoginScreen();
+                    // CASE A — server MEMASTIKAN sesi tidak berlaku -> buang token,
+                    // tampilkan login sekarang juga. Tidak ada jeda percobaan ulang.
+                    if (res && res.sessionInvalid) {
+                        clearAuthToken(); _stopSessionRetry(); _loginStatus('');
+                        if (!loginSudahTampil) _showLoginScreen();
+                        return;
+                    }
+                    // success:false TANPA sessionInvalid = error tak terduga di
+                    // server, BUKAN bukti sesi habis -> perlakukan seperti CASE B.
+                    _onSessionNetworkFail(token, loginSudahTampil);
                 })
-                .catch(() => {
-                    // Gangguan koneksi: token DIPERTAHANKAN supaya sesi bisa pulih
-                    // sendiri saat aplikasi dibuka lagi — sama seperti sebelumnya.
+                .catch(err => {
+                    // CASE B — gangguan koneksi / server: token DIPERTAHANKAN.
                     clearTimeout(revealLogin);
                     showLoader(false);
-                    if (!loginSudahTampil) _showLoginScreen();
+                    if (_appStarted) return;
+                    // Setelan deployment salah (balasan HTML): beri panduan pemulihan.
+                    if (SIGAPNet.isTransportBreak(err)) SIGAPNet.showRecovery('Server menjawab dengan halaman HTML, bukan data.');
+                    _onSessionNetworkFail(token, loginSudahTampil);
                 });
         }
 
@@ -15328,31 +15929,42 @@ const sorted = [...data].sort((a, b) => {
         }
 
         function doLogin() {
+            // [LOGIN v2] Satu login dalam satu waktu. Tombol memang dinonaktifkan,
+            // tetapi Enter pada kolom password tetap memanggil doLogin().
+            if (_loginInflight) return;
             const username = document.getElementById('login-username').value.trim();
             const password = document.getElementById('login-password').value;
             const errEl    = document.getElementById('login-error');
             const btn      = document.getElementById('btn-login');
+            _loginStatus('');
             errEl.style.display = 'none';
             if (!username || !password) {
                 errEl.textContent = 'Username dan password wajib diisi.';
                 errEl.style.display = 'block';
                 return;
             }
+            _loginInflight = true;
             btn.disabled = true;
             btn.innerHTML = '<i class="ph ph-circle-notch" style="animation:spin 1s linear infinite; display:inline-block; font-size:1.2rem;"></i> Memeriksa...';
             const pulihkanTombol = () => {
+                _loginInflight = false;
                 btn.disabled = false;
                 btn.innerHTML = '<i class="ph ph-sign-in" style="font-size:1.2rem;"></i> Masuk';
             };
 
             // [FIX KONEKSI] Login lewat SIGAPNet: ada batas waktu, ada percobaan
-            // ulang otomatis untuk gangguan sesaat, dan bila transport Apps Script
-            // memang putus user menerima tombol pemulihan — bukan sekadar pesan
-            // "Koneksi server gagal. Coba lagi." yang buntu.
+            // ulang otomatis KHUSUS gangguan sesaat (password salah / akun
+            // nonaktif adalah jawaban sah server dan tidak pernah diulang), dan
+            // bila transport Apps Script memang putus user menerima tombol
+            // pemulihan. Login hanya menunggu loginUser — tidak menunggu data
+            // dashboard, gambar, scanner, maupun pustaka PDF.
+            SIGAPPerf.mark('login_start');
             SIGAPNet.call('loginUser', [{ username, password }], { timeout: 25000, attempts: 3, onRecover: true })
                 .then(res => {
+                    SIGAPPerf.measure('AUTH', 'login_start');
                     pulihkanTombol();
                     if (res && res.success) {
+                        _stopSessionRetry();
                         saveAuthToken(res.token);   // sesi bertahan sampai user menekan Keluar
                         currentUser = res.user;
                         document.getElementById('login-password').value = '';
@@ -15364,8 +15976,9 @@ const sorted = [...data].sort((a, b) => {
                     }
                 })
                 .catch(err => {
+                    SIGAPPerf.measure('AUTH_FAIL', 'login_start');
                     pulihkanTombol();
-                    const habisWaktu = err && /TIMEOUT/i.test(err.message || '');
+                    const habisWaktu = err && (err.code === 'TIMEOUT' || /TIMEOUT/i.test(err.message || ''));
                     errEl.textContent = habisWaktu
                         ? 'Server belum menjawab. Periksa koneksi lalu coba lagi.'
                         : 'Koneksi server gagal. Coba lagi.';
@@ -15419,6 +16032,13 @@ const sorted = [...data].sort((a, b) => {
 
             // 1) Identitas sesi
             currentUser = null;
+            // [LOGIN v2] Izinkan _startApp() lagi untuk login berikutnya, hentikan
+            // cek ulang sesi di latar, dan buang jawaban bootstrap yang masih
+            // dalam perjalanan (tidak boleh mengisi layar user berikutnya).
+            _appStarted = false;
+            safe(() => _stopSessionRetry());
+            safe(() => _loginStatus(''));
+            _bootGen++;
 
             // 2) Tutup semua overlay/modal/sheet yang mungkin masih terbuka,
             //    termasuk menghentikan kamera bila sedang memindai.
@@ -15480,6 +16100,12 @@ const sorted = [...data].sort((a, b) => {
         }
 
         function _startApp() {
+            // [LOGIN v2] Hanya sekali per sesi. Sebelumnya, jawaban checkSession
+            // yang terlambat (cold start) setelah user sempat login lewat form
+            // memanggil _startApp() kedua kalinya -> bootstrap ganda.
+            if (_appStarted) return;
+            _appStarted = true;
+            SIGAPPerf.measure('TO_APP_SHELL', 'app_open');
             document.getElementById('login-screen').classList.add('hidden');
             // Chip user di header
             const chip = document.getElementById('user-chip');
@@ -15505,6 +16131,11 @@ const sorted = [...data].sort((a, b) => {
 
         // Optimisasi: Prioritaskan Master Data agar Form Keluar dan Scanner bisa instan digunakan,
         // sisanya berjalan di latar belakang (background) tanpa menahan layar loading.
+        // [LOGIN v2] Generasi boot. Dinaikkan setiap boot baru DAN saat logout,
+        // supaya jawaban fase yang masih dalam perjalanan dari sesi sebelumnya
+        // tidak pernah mengisi layar (atau foto) milik sesi berikutnya.
+        let _bootGen = 0;
+
         function _bootstrapData() {
             const start = _currentMonthStart();
 
@@ -15512,49 +16143,29 @@ const sorted = [...data].sort((a, b) => {
             // [FIX UTAMA KONEKSI] BADAI PERMINTAAN SAAT BOOT DIHENTIKAN
             // -------------------------------------------------------------
             // Versi lama menembakkan 6 google.script.run SEKALIGUS begitu master
-            // data tiba: getOutboundData, getStockCardData, getExpMonitorData,
-            // getMasterStats, getItemImages, getSmartExpRecommendation.
+            // data tiba. Enam permintaan itu menjadi ENAM eksekusi Apps Script
+            // terpisah yang masing-masing membaca ulang sheet yang sama.
+            // getBootstrapData() menyatukannya dalam satu eksekusi.
             //
-            // Enam permintaan itu menjadi ENAM eksekusi Apps Script terpisah.
-            // Masing-masing membayar cold start sendiri, membuka spreadsheet
-            // sendiri, dan membaca ulang sheet yang sama: sheet IN terbaca 4x
-            // dan sheet OUT 5x untuk satu kali buka aplikasi. Apps Script
-            // membatasi jumlah eksekusi serentak per user, jadi sebagian
-            // permintaan mengantre lalu menggantung — persis gejala
-            // "notif time out" dan "Koneksi server gagal".
-            //
-            // Ironisnya backend SUDAH punya getBootstrapData() yang menyatukan
-            // semuanya dalam satu eksekusi — komentar di kode lama pun menyebut
-            // "digabung jadi 1 round-trip" — tetapi fungsi itu tidak pernah
-            // benar-benar dipanggil. Sekarang dipakai.
-            //
-            // Sesudah perbaikan: TIDAK PERNAH lebih dari satu permintaan
-            // berjalan bersamaan.
-            //   1. getMasterData      -> buka blokir UI secepat mungkin (cached)
-            //   2. getBootstrapData   -> stock + keluar + exp + statistik SKU
-            //   3. getItemImages      -> metadata foto
-            //   4. getSmartExp...     -> rekomendasi EXP
-            // Semua fungsi apply dan seluruh aturan bisnisnya TIDAK berubah.
+            // [PERF v2] BOOTSTRAP BERTAHAP — UI BISA DIPAKAI SEBELUM DATA BERAT.
+            // -------------------------------------------------------------
+            // Satu permintaan "semua sekaligus" membuat layar baru bisa dipakai
+            // setelah bagian TERLAMBAT (foto + Smart EXP) selesai dihitung. Kini
+            // tetap getBootstrapData yang sama (tanpa endpoint baru), dipakai
+            // dalam tiga fase BERURUTAN — tidak pernah lebih dari satu fase
+            // berjalan bersamaan:
+            //   FASE 1 KRITIS  : master + statistik SKU (ber-cache)  -> UI hidup
+            //   FASE 2 SEKUNDER: kartu stock + barang keluar + exp monitor
+            //   FASE 3 BERAT   : metadata foto + rekomendasi Smart EXP
+            // Setiap fase memakai handler apply yang SAMA (_applyBootstrapPayload),
+            // jadi tidak ada jalur render kembar. Kegagalan satu fase tidak
+            // menggagalkan fase lain maupun sesi login (isolasi kegagalan).
             // =============================================================
-
-            // -------------------------------------------------------------
-            // [GITHUB PAGES] SATU PERMINTAAN UNTUK SELURUH DATA AWAL
-            // -------------------------------------------------------------
-            // Di HtmlService, satu panggilan hampir tidak berbiaya jaringan —
-            // jadi memecahnya jadi beberapa langkah berurutan tidak masalah.
-            // Di GitHub Pages hitungannya berubah total. Setiap panggilan kini:
-            //   1. POST ke script.google.com   (DNS + TLS + cold start)
-            //   2. REDIRECT 302 ke script.googleusercontent.com (DNS + TLS LAGI)
-            // Biayanya 2-4 detik PER PANGGILAN, dan cold start bisa 8 detik.
-            //
-            // Empat panggilan berurutan = 8-16 detik menatap layar kosong. Itu
-            // "delay render" yang Bapak rasakan. Karena itu master, kartu stock,
-            // barang keluar, exp monitor, statistik SKU, metadata foto, dan
-            // rekomendasi Smart EXP kini diambil dalam SATU permintaan.
-            // Di sisi backend ketujuhnya berbagi satu kali baca sheet IN dan OUT,
-            // jadi penggabungan ini tidak membuat server bekerja lebih berat.
-            // -------------------------------------------------------------
             if (typeof DashBoot !== 'undefined') DashBoot.tick('master');
+
+            const gen = ++_bootGen;
+            const bootUser = currentUser && currentUser.username;
+            const masihBerlaku = () => gen === _bootGen && !!currentUser && currentUser.username === bootUser;
 
             // -------------------------------------------------------------
             // [PERF] LANGKAH 1 — ISI LAYAR SEKARANG JUGA DARI FOTO TERAKHIR.
@@ -15564,65 +16175,74 @@ const sorted = [...data].sort((a, b) => {
             // angka yang akhirnya dilihat user tetap angka asli dari Sheet.
             // -------------------------------------------------------------
             let adaSnapshot = false;
-            const snap = SIGAPCache.load(currentUser && currentUser.username);
+            const snap = SIGAPCache.load(bootUser);
             if (snap) {
                 try {
                     // _applyBootstrapPayload() sudah memanggil DashBoot.finish()
                     // di dalamnya, jadi popup progres ikut tertutup di sini —
                     // tidak perlu (dan tidak boleh) dipanggil dua kali.
-                    _applyBootstrapPayload(snap.data, start);
+                    SIGAPPerf.time('RENDER_SNAPSHOT', () => _applyBootstrapPayload(snap.data, start));
                     _tampilkanPenandaSnapshot(snap.ageMs, false);
                     adaSnapshot = true;
                 } catch (e) {
                     // Foto rusak / bentuknya tidak cocok dengan versi kode ini.
                     console.warn('Snapshot gagal dipakai, diabaikan:', e && e.message);
-                    SIGAPCache.clear(currentUser && currentUser.username);
+                    SIGAPCache.clear(bootUser);
                     adaSnapshot = false;
                 }
             }
 
             // -------------------------------------------------------------
-            // [PERF] LANGKAH 2 — PAKAI PERMINTAAN YANG SUDAH JALAN SEJAK AWAL.
-            // _prefetchBootstrap() menembakkan getBootstrapData BERSAMAAN dengan
-            // checkSession, bukan sesudahnya. Dua permintaan yang tadinya
-            // BERURUTAN (2-4 detik + 2-8 detik) kini BERBARENGAN, jadi total
-            // tunggu tinggal selama yang paling lambat saja.
+            // [PERF] LANGKAH 2 — PAKAI PERMINTAAN FASE 1 YANG SUDAH JALAN SEJAK
+            // AWAL (_prefetchBootstrap, berbarengan dengan checkSession).
             // -------------------------------------------------------------
             const pre = _bootPrefetch;
             _bootPrefetch = null;
-            // Bila prefetch gagal, panggilan sungguhan diulang SEKALI dengan
-            // dialog pemulihan aktif — persis perilaku sebelum ada prefetch.
-            const minta = pre ? pre.catch(() => _callBootstrap(start)) : _callBootstrap(start);
+            if (!pre) SIGAPPerf.mark('boot_p1_start');
+            // Bila prefetch gagal, fase 1 diulang SEKALI dengan dialog pemulihan
+            // aktif — persis perilaku sebelum ada prefetch.
+            const fase1 = pre ? pre.catch(() => _callBootstrapPhase(1, start)) : _callBootstrapPhase(1, start);
 
-            // Penanda waktu permintaan ini DIKIRIM. Bila di tengah jalan user
+            // Penanda waktu permintaan PERTAMA dikirim. Bila di tengah jalan user
             // sempat menyimpan sesuatu, jawaban yang tiba nanti sudah BASI —
-            // isinya dibaca server SEBELUM transaksi itu masuk. Data seperti itu
-            // tidak boleh disimpan sebagai foto, karena akan membuat pembukaan
-            // berikutnya menampilkan angka SEBELUM transaksi user sendiri.
-            // Memakai epoch prefetch (yang paling tua) di jalur mana pun adalah
-            // sisi yang aman: paling banter foto tidak jadi disimpan.
+            // tidak boleh disimpan sebagai foto (lihat simpanFoto). Memakai epoch
+            // yang paling tua adalah sisi yang aman: paling banter foto tidak
+            // jadi disimpan.
             const epochSaatKirim = pre ? _bootPrefetchEpoch : _writeEpoch;
+            const gabungan = {};   // foto = gabungan hasil seluruh fase
+            const ctx = { start: start, gabungan: gabungan, adaSnapshot: adaSnapshot, snap: snap,
+                          masihBerlaku: masihBerlaku, legacy: false, fase2Ok: false,
+                          simpanFoto: () => {
+                              // Disimpan HANYA bila (a) fase 1 & 2 sukses, (b) tidak ada
+                              // penulisan sejak permintaan dikirim, (c) sesi masih sama.
+                              if (!ctx.fase2Ok || !masihBerlaku() || _writeEpoch !== epochSaatKirim) return;
+                              SIGAPCache.save(bootUser, gabungan);
+                          } };
 
-            minta
+            fase1
                 .then(res => {
+                    if (!masihBerlaku()) return;
                     const d = (res && res.success && res.data) ? res.data : null;
                     if (!d) throw new Error('BOOTSTRAP_KOSONG');
+                    SIGAPPerf.measure('BOOTSTRAP_P1', 'boot_p1_start');
+                    SIGAPPerf.time('RENDER_P1', () => _applyBootstrapPayload(d, start));
+                    Object.assign(gabungan, d);
 
-                    _applyBootstrapPayload(d, start);
-
-                    // Data asli sudah tiba — penanda "data tersimpan" dicabut.
-                    _sembunyikanPenandaSnapshot();
-
-                    // Simpan sebagai foto untuk pembukaan berikutnya. Disimpan
-                    // HANYA bila (a) server menjawab sukses DAN (b) tidak ada
-                    // penulisan yang menyusul sejak permintaan ini dikirim.
-                    if (_writeEpoch === epochSaatKirim) {
-                        SIGAPCache.save(currentUser && currentUser.username, d);
+                    // Backend lama yang belum mengenal `parts` menjawab SEMUA bagian
+                    // sekaligus di fase 1 — fase 2 tidak perlu lagi.
+                    if (d.stock || d.outbound || d.exp) {
+                        ctx.legacy = true;
+                        ctx.fase2Ok = true;
+                        _sembunyikanPenandaSnapshot();
+                        ctx.simpanFoto();
+                        _bootFase3(ctx);
+                        return;
                     }
+                    _bootFase2(ctx);
                 })
                 .catch(err => {
-                    // Backend belum di-deploy ulang (belum mengenal withImages/
-                    // withSmartExp), atau permintaannya gagal: pakai jalur lama.
+                    if (!masihBerlaku()) return;
+                    // Fase kritis gagal: jalur lama dipertahankan apa adanya.
                     if (typeof DashBoot !== 'undefined') DashBoot.finish();
                     console.warn('getBootstrapData gagal, memakai jalur terpisah:', err && err.message);
                     if (adaSnapshot) {
@@ -15633,15 +16253,79 @@ const sorted = [...data].sort((a, b) => {
                     }
                     _startAppFallback();
                     loadItemImages(() => loadSmartExp(false));
-                })
-                .then(() => {
-                    // Pustaka berat dihangatkan saat browser senggang, setelah
-                    // semua permintaan data selesai — tidak mengganggu apa pun.
+                    // Pustaka berat dihangatkan saat browser senggang.
                     if (window.SIGAPLib) SIGAPLib.warm();
                 });
         }
 
-        /** Satu panggilan getBootstrapData dengan setelan baku. */
+        /** FASE 2 — data sekunder (stock, barang keluar, exp monitor). */
+        function _bootFase2(ctx) {
+            SIGAPPerf.mark('boot_p2_start');
+            _callBootstrapPhase(2, ctx.start)
+                .then(res => {
+                    if (!ctx.masihBerlaku()) return;
+                    const d = (res && res.success && res.data) ? res.data : null;
+                    if (!d) throw new Error('BOOTSTRAP_KOSONG');
+                    SIGAPPerf.measure('BOOTSTRAP_P2', 'boot_p2_start');
+                    SIGAPPerf.time('RENDER_P2', () => _applyBootstrapPayload(d, ctx.start));
+                    Object.assign(ctx.gabungan, d);
+                    ctx.fase2Ok = true;
+                    // Data asli sudah tiba — penanda "data tersimpan" dicabut.
+                    _sembunyikanPenandaSnapshot();
+                    ctx.simpanFoto();
+                })
+                .catch(err => {
+                    if (!ctx.masihBerlaku()) return;
+                    // Isolasi: hanya bagian sekunder yang dimuat ulang terpisah —
+                    // sesi, master, dan UI yang sudah hidup tidak terpengaruh.
+                    console.warn('Bootstrap fase 2 gagal, memakai jalur terpisah:', err && err.message);
+                    if (ctx.adaSnapshot) _tampilkanPenandaSnapshot(ctx.snap.ageMs, true);
+                    loadStockDataSilent();
+                    loadExpDataSilent();
+                    loadOutboundDataSilent();
+                })
+                .then(() => { if (ctx.masihBerlaku()) _bootFase3(ctx); });
+        }
+
+        /** FASE 3 — berat / latar (metadata foto + Smart EXP). */
+        function _bootFase3(ctx) {
+            const selesai = () => {
+                // Pustaka berat dihangatkan saat browser senggang, setelah
+                // semua permintaan data selesai — tidak mengganggu apa pun.
+                if (window.SIGAPLib) SIGAPLib.warm();
+                SIGAPPerf.measure('BOOT_TOTAL', 'app_open');
+                SIGAPPerf.summary();
+            };
+            if (ctx.legacy) {
+                // Backend lama: jalur terpisah yang sudah terbukti.
+                loadItemImages(() => { loadSmartExp(false); selesai(); });
+                return;
+            }
+            SIGAPPerf.mark('boot_p3_start');
+            _callBootstrapPhase(3, ctx.start)
+                .then(res => {
+                    if (!ctx.masihBerlaku()) return;
+                    const d = (res && res.success && res.data) ? res.data : null;
+                    if (!d) throw new Error('BOOTSTRAP_KOSONG');
+                    SIGAPPerf.measure('BOOTSTRAP_P3', 'boot_p3_start');
+                    SIGAPPerf.time('RENDER_P3', () => _applyBootstrapPayload(d, ctx.start));
+                    if (d.images)   ctx.gabungan.images   = d.images;
+                    if (d.smartExp) ctx.gabungan.smartExp = d.smartExp;
+                    ctx.simpanFoto();
+                })
+                .catch(err => {
+                    if (!ctx.masihBerlaku()) return;
+                    console.warn('Bootstrap fase 3 gagal, memakai jalur terpisah:', err && err.message);
+                    loadItemImages(() => loadSmartExp(false));
+                })
+                .then(selesai);
+        }
+
+        /**
+         * Satu panggilan getBootstrapData PENUH dengan setelan baku.
+         * [PERF v2] Tidak lagi dipakai jalur boot (diganti _callBootstrapPhase),
+         * tetapi DIPERTAHANKAN untuk kompatibilitas pemanggil lain.
+         */
         function _callBootstrap(start) {
             return SIGAPNet.call('getBootstrapData',
                 [_withAuth({ startDate: start, withImages: true, withSmartExp: true, horizonDays: 60 })],
